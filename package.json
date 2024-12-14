@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "child_process": "^1.0.2",
+    "python-shell": "^5.0.0"
+  }
+}

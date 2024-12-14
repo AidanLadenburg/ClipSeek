@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Clip Seek</title>
+    <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+    <div id="app">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <h1>Clip Seek</h1>
+            <button id="settingsBtn" class="gear-icon">⚙️</button>
+        </div>
+
+        <div id="mainPage">
+            <label for="search">Search for Video:</label>
+            <div style="display: flex; gap: 10px; align-items: center;">
+                <input type="text" id="search" placeholder="Search Query">
+                <button id="searchButton" class="magnifying-glass-icon">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                        <path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001c.03.04.062.078.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.1zm-5.442-9.1a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11z"/>
+                    </svg>
+                </button>
+                <button id="uploadButton" class="magnifying-glass-icon">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M5 20h14a1 1 0 0 0 1-1v-4h2v4a3 3 0 0 1-3 3H5a3 3 0 0 1-3-3v-4h2v4a1 1 0 0 0 1 1zM13 3.414V16h-2V3.414L8.707 5.707l-1.414-1.414L12 0l4.707 4.707-1.414 1.414L13 3.414z"/>
+                    </svg>
+                </button>
+                                                             
+                <input type="file" id="fileInput" accept="image/*,video/*" style="display:none;">                
+                <button id="filterButton" class="filter-icon">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
+                        <path d="M3 17h2a1 1 0 010 2H3a1 1 0 010-2zm5.5 0h11a1 1 0 010 2H8.5a1 1 0 010-2zM3 11h11a1 1 0 010 2H3a1 1 0 010-2zm14.5 0h2a1 1 0 010 2h-2a1 1 0 010-2zM3 5h17a1 1 0 010 2H3a1 1 0 010-2z" />
+                    </svg>
+                </button>
+            </div>
+            <div id="filterMenu" style="display: none; gap: 10px; align-items: center;">
+                <label for="dateFrom">Date From:</label>
+                <input type="date" id="dateFrom">
+                <label for="dateTo">Date To:</label>
+                <input type="date" id="dateTo">
+            </div>                                     
+                     
+            <div id="buttonContainer" style="display: flex; gap: 10px;">
+                <button id="importSelectedBtn" style="display: none;">Import Selected Videos</button>
+                <button id="searchSimilarBtn" style="display: none;">Search Similar</button>
+                <button id="clearSelectedBtn" style="display: none;">Clear Selected</button>
+            </div>
+            <div id="results"></div>
+            <button id="loadMoreBtn" style="display: none;">Load More</button>
+            
+        </div>
+
+        <div id="settingsPage" style="display: none;">
+            <h2>Settings</h2>
+        
+            <label for="videoFolderInput">Restrict Search to Folder:</label>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <input type="text" id="videoFolderInput" placeholder="Enter video folder path" style="flex: 1;" />
+                <button id="videoFolderSelectBtn">Select Folder</button>
+            </div>
+        
+            <label for="embeddingFolderInput">Embedding Folder Path:</label>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <input type="text" id="embeddingFolderInput" placeholder="Enter embedding folder path" style="flex: 1;" />
+                <button id="embeddingFolderSelectBtn">Select Folder</button>
+            </div>
+        
+            <label for="meanMaxSwitch">Search Version:</label>
+            <div style="display: flex; align-items: center; gap: 10px;">
+                <span>Max</span>
+                <label class="switch">
+                    <input type="checkbox" id="meanMaxSwitch">
+                    <span class="slider round"></span>
+                </label>
+                <span>Mean</span>
+            </div>
+            <div style="margin-top: 10px;"></div>
+            <label for="debugSwitch">Debug Mode:</label>
+            <div style="display: flex; align-items: center; gap: 10px;">
+                <label class="switch">
+                    <input type="checkbox" id="debugSwitch">
+                    <span class="slider round"></span>
+                </label>
+            </div>
+            <label for="proxySwitch">Import as Proxy:</label>
+            <div style="display: flex; align-items: center; gap: 10px;">
+                <label class="switch">
+                    <input type="checkbox" id="proxySwitch">
+                    <span class="slider round"></span>
+                </label>
+            </div>
+            <div id="proxySettings" style="display: none; margin-top: 10px;">
+                <label for="proxyLocation">Proxy Location:</label>
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <input type="text" id="proxyLocation" placeholder="Enter proxy folder path" style="flex: 1;" />
+                    <button id="proxyLocationSelectBtn">Select Folder</button>
+                </div>
+            
+                <label for="fullResLocation">Full Resolution Location:</label>
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <input type="text" id="fullResLocation" placeholder="Enter full resolution folder path" style="flex: 1;" />
+                    <button id="fullResLocationSelectBtn">Select Folder</button>
+                </div>
+            </div>            
+            <div style="margin-top: 10px;">
+                <button id="annotationPageBtn">Add Annotation</button>
+            </div>
+            <button id="saveSettingsBtn">Save Settings</button>
+            <button id="backBtn">Back</button>
+        </div>
+
+        <div id="annotationPage" style="display: none;">
+            <h2>Add Annotation</h2>
+            <label for="annotationFolder">Annotation Folder:</label>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <input type="text" id="annotationFolder" placeholder="Enter annotation folder path" style="flex: 1;" />
+                <button id="annotationFolderSelectBtn">Select Folder</button>
+            </div>
+        
+            <label for="annotationKey">Annotation Key:</label>
+            <input type="text" id="annotationKey" placeholder="Enter name of object">
+        
+            <label for="annotationMedium">Annotation Medium:</label>
+            <select id="annotationMedium">
+                <option value="NA">Choose an Option...</option>
+                <!--option value="text">Text</option-->
+                <option value="image">Image</option>
+                <!--option value="video">Video Path</option-->
+            </select>
+        
+            <div id="annotationTextContainer" style="display: none;">
+                <label for="annotationText">Text:</label>
+                <input type="text" id="annotationText" placeholder="Enter annotation text">
+            </div>
+        
+            <div id="annotationImageContainer" style="display: none;">
+                <label for="annotationImage">Upload Image:</label>
+                <input type="file" id="annotationImage" accept="image/*">
+            </div>
+        
+            <div id="annotationVideoContainer" style="display: none;">
+                <label for="annotationVideo">Video Path:</label>
+                <input type="text" id="annotationVideo" placeholder="Enter video path">
+            </div>
+        
+            <button id="saveAnnotationBtn">Save Annotation</button>
+            <button id="backToSettingsBtn">Back to Settings</button>
+        </div>
+        
+        
+        <div id="contextMenu" class="context-menu">
+            <ul>
+                <li id="enlargeOption">Enlarge</li>
+                <li id="importOption">Import Video</li>
+                <li id="searchSimilarOption">Search Similar</li>
+                <li id="revealInFinderOption">Reveal in Finder</li>
+            </ul>
+        </div>
+        
+        <div id="videoModal" class="modal">
+            <div class="modal-content">
+                <span id="closeModal" class="close">&times;</span>
+                <video id="modalVideo" controls></video>
+            </div>
+        </div>
+
+    </div>
+
+    <script type="text/javascript" src="./lib/CSInterface.js"></script>
+    <script src="js/main.js"></script>
+</body>
+</html>

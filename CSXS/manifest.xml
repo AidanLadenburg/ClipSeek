@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ExtensionManifest Version="9.0" ExtensionBundleId="com.clipseek" ExtensionBundleVersion="0.0.4"
+ExtensionBundleName="Clip Seek" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+	<ExtensionList>
+		<Extension Id="com.clipseek" Version="0.0.4" />
+	</ExtensionList>
+
+	<ExecutionEnvironment>
+		<HostList>
+			<Host Name="PPRO" Version="9.0" />
+		</HostList>
+		<LocaleList>
+			<Locale Code="All" />
+		</LocaleList>
+		<RequiredRuntimeList>
+			<RequiredRuntime Name="CSXS" Version="9.0" />
+		</RequiredRuntimeList>
+	</ExecutionEnvironment>
+
+	<Capabilities>
+        <NetworkAccess>true</NetworkAccess>
+        <FileAccess>true</FileAccess>
+        <PlayerDebugMode>true</PlayerDebugMode>
+    </Capabilities>
+
+	<DispatchInfoList>
+		<Extension Id="com.clipseek">
+			<DispatchInfo >
+				<Resources>
+					<ScriptPath>./jsx/importVideoToProject.jsx</ScriptPath>
+					<MainPath>./index.html</MainPath>
+					<CEFCommandLine>
+						<Parameter>--allow-file-access</Parameter>
+						<Parameter>--allow-file-access-from-files</Parameter>
+						<Parameter>--allow-running-insecure-content</Parameter>
+						<Parameter>--enable-nodejs</Parameter>
+                        <Parameter>--mixed-context</Parameter>
+						<Parameter>--enable-media-stream</Parameter>
+						<Parameter>--disable-web-security</Parameter>
+					</CEFCommandLine>
+				</Resources>
+				<Lifecycle>
+					<AutoVisible>true</AutoVisible>
+				</Lifecycle>
+				<UI>
+					<Type>Panel</Type>
+					<Menu>ClipSeek(DEV)</Menu>
+					<Geometry>
+						<Size>
+							<Height>600</Height>
+							<Width>800</Width>
+						</Size>
+					</Geometry>
+				</UI>
+				<RequiredRuntimeList>
+                    <RequiredRuntime Name="ExtendScript" Version="9.0" />
+                </RequiredRuntimeList>
+			</DispatchInfo>
+		</Extension>
+	</DispatchInfoList>
+</ExtensionManifest>
