@@ -25,6 +25,22 @@ if getattr(sys, 'frozen', False):
     import pyi_splash
 
 
+def fix_path(path):
+    working = path.replace("\\\\ ", "\\\\")
+    working = working.replace("// ", "//")
+    working = working.replace("\\ ", "\\")
+    working = working.replace("/ ", "/")
+    working = working.replace("\\\\", "\\")
+    working = working.replace("//", "/")
+    working = working.replace("\\", "/")
+    if os.path.exists(working): return working
+    if os.path.exists(working.replace('.mp4', '.mov.mp4')): return working.replace('.mp4', '.mov.mp4')
+    if os.path.exists(working.replace('.mp4','.mp4.mp4')): return working.replace('.mp4','.mp4.mp4')
+    if os.path.exists(working.replace('.mp4','.wav.mp4')): return working.replace('.mp4','.wav.mp4')
+    if os.path.exists(working.replace('.mp4','.mp3.mp4')): return working.replace('.mp4','.mp3.mp4')
+    print(f'failed to find working path {path}')
+    return path
+    
 class FileScanner(QThread):
     video_found = pyqtSignal(str, int)  # Emits filename and current count
     finished = pyqtSignal(list)
@@ -40,7 +56,6 @@ class FileScanner(QThread):
         try:
             video_files = []
             video_count = 0
-            
             for root, _, files in os.walk(self.folder_path):
                 if not self.is_running:
                     return
@@ -51,7 +66,8 @@ class FileScanner(QThread):
                     
                     if file.lower().endswith(self.supported_extensions):
                         video_path = os.path.join(root, file)
-                        video_files.append(video_path)
+                        if os.path.exists(fix_path(video_path)): video_files.append(fix_path(video_path))
+                        elif os.path.exists(video_path): video_files.append(video_path)
                         video_count += 1
                         self.video_found.emit(file, video_count)
 
@@ -67,12 +83,12 @@ class FileScanner(QThread):
 class video_obj():
     def __init__(self, path, clip, num_streams=4, progress_callback=None):
         self.title = os.path.basename(path)                       
-        self.path = self.fix_path(path)                                        
+        self.path = fix_path(path)                                        
         self.proxy = ""                                         
         self.chunks = self.encode_chunks(path, clip, num_streams, progress_callback)            
         self.audio = self.encode_audio(path)               
         self.shot_type = []
-        self.datetime = datetime.fromtimestamp(os.stat(self.fix_path(path)).st_mtime)                                  
+        self.datetime = datetime.fromtimestamp(os.stat(fix_path(path)).st_mtime)                                  
         self.annotations = []                                   
         self.transcript = ""                                    
         self.sims = []
@@ -84,20 +100,6 @@ class video_obj():
 
     def encode_audio(self, path):
         return None
-    
-    def fix_path(self, path):
-        working = path.replace("\\\\", "\\")
-        working = working.replace("//", "/")
-        working = working.replace("\\ ", "\\")
-        working = working.replace("/ ", "/")
-        working = working.replace("\\", "/")
-        if os.path.exists(working): return working
-        if os.path.exists(working.replace('.mp4', '.mov.mp4')): return working.replace('.mp4', '.mov.mp4')
-        if os.path.exists(working.replace('.mp4','.mp4.mp4')): return working.replace('.mp4','.mp4.mp4')
-        if os.path.exists(working.replace('.mp4','.wav.mp4')): return working.replace('.mp4','.wav.mp4')
-        if os.path.exists(working.replace('.mp4','.mp3.mp4')): return working.replace('.mp4','.mp3.mp4')
-        print(f'failed to find working path {path}')
-        return path
 
     def save(self, out):
         file = open(out, 'wb')   
@@ -126,7 +128,7 @@ class VideoProcessingWorker(QThread):
 
     def hash_file_path(self, file_path):
         """Creates a unique hash for a file path."""
-        return hashlib.md5(self.fix_path(file_path).encode()).hexdigest()
+        return hashlib.md5(fix_path(file_path).encode()).hexdigest()
 
     def load_processed_files(self):
         """Loads processed files from the log file."""
@@ -142,21 +144,7 @@ class VideoProcessingWorker(QThread):
         """Logs a processed file to the log file."""
         with open(self.log_file, 'a', newline='', encoding='utf-8') as file:
             writer = csv.writer(file)
-            writer.writerow([file_hash, file_path])
-
-    def fix_path(self, path):
-        working = path.replace("\\\\", "\\")
-        working = working.replace("//", "/")
-        working = working.replace("\\ ", "\\")
-        working = working.replace("/ ", "/")
-        working = working.replace("\\", "/")
-        if os.path.exists(working): return working
-        if os.path.exists(working.replace('.mp4', '.mov.mp4')): return working.replace('.mp4', '.mov.mp4')
-        if os.path.exists(working.replace('.mp4','.mp4.mp4')): return working.replace('.mp4','.mp4.mp4')
-        if os.path.exists(working.replace('.mp4','.wav.mp4')): return working.replace('.mp4','.wav.mp4')
-        if os.path.exists(working.replace('.mp4','.mp3.mp4')): return working.replace('.mp4','.mp3.mp4')
-        print(f'failed to find working path {path}')
-        return path
+            writer.writerow([file_hash, fix_path(file_path)])
 
     def update_cache_file(self, files):
         """Updates the cache file with the current processed files."""
