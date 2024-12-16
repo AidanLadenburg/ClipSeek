@@ -12,6 +12,7 @@ import numpy as np
 import logging
 import math
 import pickle
+import threading
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QLabel, QLineEdit, QPushButton,
     QFileDialog, QMessageBox, QProgressBar, QWidget, QVBoxLayout, QSpinBox
@@ -112,6 +113,7 @@ class VideoProcessingWorker(QThread):
     status_updated = pyqtSignal(str)
     finished = pyqtSignal()
     error_occurred = pyqtSignal(str)
+    csv_lock = threading.Lock()
 
     def __init__(self, clip, video_files, output_folder, num_streams=4, parallel_workers=1, log_file='processed_files.csv', cache_interval=100):
         super().__init__()
@@ -142,9 +144,11 @@ class VideoProcessingWorker(QThread):
 
     def save_processed_file(self, file_hash, file_path):
         """Logs a processed file to the log file."""
-        with open(self.log_file, 'a', newline='', encoding='utf-8') as file:
-            writer = csv.writer(file)
-            writer.writerow([file_hash, fix_path(file_path)])
+        with self.csv_lock:  # Ensure exclusive access to the file
+            with open(self.log_file, 'a', newline='', encoding='utf-8') as file:
+                writer = csv.writer(file)
+                writer.writerow([file_hash, fix_path(file_path)])
+
 
     def update_cache_file(self, files):
         """Updates the cache file with the current processed files."""
@@ -229,6 +233,7 @@ class VideoProcessingWorker(QThread):
                         self.status_updated.emit("Processing cancelled.")
                         break
                     result = future.result()  # Wait for processing to complete
+
                     if result is not None:
                         self.progress_updated.emit(int(100 * ((i + 1) / total_files)))
                     # Periodically save to cache
