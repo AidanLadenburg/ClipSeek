@@ -11,9 +11,9 @@ let isProxy = JSON.parse(localStorage.getItem('isProxy') || "false");
 
 
 
-    // Load saved proxy and full resolution locations
-    document.getElementById('proxyLocation').value = localStorage.getItem('proxyLocation') || '';
-    document.getElementById('fullResLocation').value = localStorage.getItem('fullResLocation') || '';
+// Load saved proxy and full resolution locations
+document.getElementById('proxyLocation').value = localStorage.getItem('proxyLocation') || '';
+document.getElementById('fullResLocation').value = localStorage.getItem('fullResLocation') || '';
 
 document.getElementById('proxyLocation').addEventListener('change', () => {
     localStorage.setItem('proxyLocation', document.getElementById('proxyLocation').value);
@@ -215,6 +215,11 @@ saveSettingsBtn.addEventListener('click', () => {
     const newVideoFolder = document.getElementById('videoFolderInput').value;
     const currentVideoFolder = selectedFolders.embeddingFolder;
 
+    const proxyLocation = document.getElementById('proxyLocation').value;
+    localStorage.setItem('proxyLocation', proxyLocation);
+    const fullResLocation = document.getElementById('fullResLocation').value;
+    localStorage.setItem('fullResLocation', fullResLocation);
+
     debugMode = document.getElementById('debugSwitch').checked;
     localStorage.setItem('debugMode', JSON.stringify(debugMode));
 
@@ -377,22 +382,16 @@ window.addEventListener('click', (event) => {
 
 importOption.addEventListener('click', () => {
     if (selectedVideoPath) {
-        const proxyPath = document.getElementById('proxyLocation').value.trim();
-        const fullResPath = document.getElementById('fullResLocation').value.trim();
-        const isProxy = document.getElementById('proxySwitch').checked;
-
-        const normalizedSelectedVideoPath = selectedVideoPath.replace(/\\/g, '/');
-        const fullResVideoPath = getFullResPath(proxyPath, fullResPath, normalizedSelectedVideoPath);
-
-        const fullResExists = fullResVideoPath && fs.existsSync(fullResVideoPath);
-
-        csInterface.evalScript(`importVideoToProject(
-            "${normalizedSelectedVideoPath.replace(/\\/g, '\\\\')}", 
-            "${selectedVideoTime}", 
-            ${isProxy && fullResExists}, 
-            "${fullResVideoPath}"
-        )`);
-
+        print("Importing video: "+ selectedVideoPath);
+        proxyPath = document.getElementById('proxyLocation').value.trim();
+        fullResPath = document.getElementById('fullResLocation').value.trim();
+        isProxy = document.getElementById('proxySwitch').checked;
+        normalizedSelectedVideoPath = selectedVideoPath.replace(/\\/g, '/');
+        fullResVideoPath = getFullResPath(proxyPath, fullResPath, normalizedSelectedVideoPath);
+            
+        fullResExists = fullResVideoPath && fs.existsSync(fullResVideoPath);
+        
+        csInterface.evalScript(`importVideoToProject("${normalizedSelectedVideoPath.replace(/\\/g, '\\\\')}", "${selectedVideoTime}", ${isProxy && fullResExists},"${fullResVideoPath}")`);
         contextMenu.style.display = 'none';
     }
 });
@@ -434,26 +433,25 @@ filterButton.addEventListener('click', () => {
 
 
 function getFullResPath(proxyPath, fullResPath, videoPath) {
-    const normalizedProxyPath = proxyPath.replace(/\\/g, '/');
-    const normalizedFullResPath = fullResPath.replace(/\\/g, '/');
-    const normalizedVideoPath = videoPath.replace(/\\/g, '/');
-    
+    normalizedProxyPath = proxyPath.replace(/\\/g, '/');
+    normalizedFullResPath = fullResPath.replace(/\\/g, '/');
+    normalizedVideoPath = videoPath.replace(/\\/g, '/');
     if (!normalizedVideoPath.startsWith(normalizedProxyPath)) {
         return null;
     }
     var replaced = normalizedVideoPath.replace(normalizedProxyPath, normalizedFullResPath);
-    
     if (fs.existsSync(replaced)) {return replaced;}
    
     if (fs.existsSync(replaced.replace('.mov.mp4','.mov'))) {return replaced.replace('.mov.mp4','.mov');}
+    if (fs.existsSync(replaced.replace('.MXF.mp4','.MXF'))) {return replaced.replace('.MXF.mp4','.MXF');}
   
-    if (fs.existsSync(replaced.replace('.mp4.mp4','.mov'))) {return replaced.replace('.mp4.mp4','.mp4');}
-    if (fs.existsSync(replaced.replace('.mp3.mp4','.mov'))) {return replaced.replace('.mp3.mp4','.mp3');}
-    if (fs.existsSync(replaced.replace('.wav.mp4','.mov'))) {return replaced.replace('.wav.mp4','.wav');}
-    if (fs.existsSync(replaced.replace('.avi.mp4','.mov'))) {return replaced.replace('.avi.mp4','.avi');}
-    if (fs.existsSync(replaced.replace('.mkv.mp4','.mov'))) {return replaced.replace('.mkv.mp4','.mkv');}
-    if (fs.existsSync(replaced.replace('.webm.mp4','.mov'))) {return replaced.replace('.webm.mp4','.webm');}
-    if (fs.existsSync(replaced.replace('.hevc.mp4','.mov'))) {return replaced.replace('.hevc.mp4','.hevc');}
+    if (fs.existsSync(replaced.replace('.mp4.mp4','.mp4'))) {return replaced.replace('.mp4.mp4','.mp4');}
+    if (fs.existsSync(replaced.replace('.mp3.mp4','.mp3'))) {return replaced.replace('.mp3.mp4','.mp3');}
+    if (fs.existsSync(replaced.replace('.wav.mp4','.wav'))) {return replaced.replace('.wav.mp4','.wav');}
+    if (fs.existsSync(replaced.replace('.avi.mp4','.avi'))) {return replaced.replace('.avi.mp4','.avi');}
+    if (fs.existsSync(replaced.replace('.mkv.mp4','.mkv'))) {return replaced.replace('.mkv.mp4','.mkv');}
+    if (fs.existsSync(replaced.replace('.webm.mp4','.webm'))) {return replaced.replace('.webm.mp4','.webm');}
+    if (fs.existsSync(replaced.replace('.hevc.mp4','.hevc'))) {return replaced.replace('.hevc.mp4','.hevc');}
     //R3D files
     p = replaced.split("/");
     g = replaced.split("/")[p.length-1];
@@ -461,7 +459,6 @@ function getFullResPath(proxyPath, fullResPath, videoPath) {
     p[p.length-1] = g+".RDC";
     p.push(g+"_001.R3D");
     p = p.join("/");
-            
     
     return p;
 }
@@ -559,28 +556,23 @@ document.getElementById('searchSimilarBtn').addEventListener('click', () => {sea
 document.getElementById('clearSelectedBtn').addEventListener('click', clearSelected);
 
 function importSelectedVideos() {
-    const proxyPath = document.getElementById('proxyLocation').value.trim();
-    const fullResPath = document.getElementById('fullResLocation').value.trim();
-    const isProxy = document.getElementById('proxySwitch').checked;
-
     selectedVideos.forEach(objKey => {  
-        const { videoPath, time } = JSON.parse(objKey);
-        const normalizedVideoPath = videoPath.replace(/\\/g, '/');
-        const fullResVideoPath = getFullResPath(proxyPath, fullResPath, normalizedVideoPath);
+        const { videoPath, time } = JSON.parse(objKey); // Parse JSON string to object
+        //selectedVideoPath = videoPath;
+        const proxyPath = document.getElementById('proxyLocation').value.trim();
+        const fullResPath = document.getElementById('fullResLocation').value.trim();
+        const isProxy = document.getElementById('proxySwitch').checked;
 
-        const fullResExists = fullResVideoPath && fs.existsSync(fullResVideoPath);
-
-        csInterface.evalScript(`importVideoToProject(
-            "${normalizedVideoPath.replace(/\\/g, '\\\\')}", 
-            "${time}", 
-            ${isProxy && fullResExists}, 
-            "${fullResVideoPath}"
-        )`);
+        const normalizedSelectedVideoPath = videoPath.replace(/\\/g, '/');
+        fullResVideoPath = getFullResPath(proxyPath, fullResPath, normalizedSelectedVideoPath);
+            
+            
+        fullResExists = fullResVideoPath && fs.existsSync(fullResVideoPath);
+        
+        csInterface.evalScript(`importVideoToProject("${normalizedSelectedVideoPath.replace(/\\/g, '\\\\')}", "${time}", ${isProxy && fullResExists},"${fullResVideoPath}")`);
     });
-
     clearSelected();
 }
-
 
 function clearSelected() {
     selectedVideos.clear();
@@ -731,7 +723,7 @@ function displayResults(files) {
             //print(fullResVideoPath);
             
             csInterface.evalScript(`importVideoToProject("${normalizedSelectedVideoPath.replace(/\\/g, '\\\\')}", "${time}", ${isProxy && fullResExists},"${fullResVideoPath}")`);
-
+            
         });
 
         videoContainer.addEventListener('contextmenu', (event) => {
