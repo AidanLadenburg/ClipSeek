@@ -30,11 +30,16 @@ function selectFolder() {
 
 
 function revealInFinder(filePath) {
-        var folder = new Folder(filePath);
-        if (folder.exists) {
-            folder.execute(); // Opens the folder in Finder/Explorer
-        }
+    var folder = new Folder(filePath);
+    if (folder.exists) {
+        folder.execute(); // Opens the folder in Finder/Explorer
+    }
 }
 
-
+function getSelectedClipFilePath() {
+    if (app.project && app.project.rootItem && app.project.rootItem.children.numItems > 0) {
+        return app.getCurrentProjectViewSelection()[0].getMediaPath();
+    }
+    return null;
+}
 
