@@ -432,36 +432,70 @@ filterButton.addEventListener('click', () => {
 });
 
 
-function getFullResPath(proxyPath, fullResPath, videoPath) {
-    normalizedProxyPath = proxyPath.replace(/\\/g, '/');
-    normalizedFullResPath = fullResPath.replace(/\\/g, '/');
-    normalizedVideoPath = videoPath.replace(/\\/g, '/');
+function getFullResPath(proxyPath, fullResPaths, videoPath) {
+    // Normalize paths
+    const normalizedProxyPath = proxyPath.replace(/\\/g, '/');
+    const normalizedVideoPath = videoPath.replace(/\\/g, '/');
+    
+    // Ensure the video path starts with the proxy path
     if (!normalizedVideoPath.startsWith(normalizedProxyPath)) {
+        if (isProxy) print("Video path does not start with the proxy path.");
         return null;
     }
-    var replaced = normalizedVideoPath.replace(normalizedProxyPath, normalizedFullResPath);
-    if (fs.existsSync(replaced)) {return replaced;}
-   
-    if (fs.existsSync(replaced.replace('.mov.mp4','.mov'))) {return replaced.replace('.mov.mp4','.mov');}
-    if (fs.existsSync(replaced.replace('.MXF.mp4','.MXF'))) {return replaced.replace('.MXF.mp4','.MXF');}
-  
-    if (fs.existsSync(replaced.replace('.mp4.mp4','.mp4'))) {return replaced.replace('.mp4.mp4','.mp4');}
-    if (fs.existsSync(replaced.replace('.mp3.mp4','.mp3'))) {return replaced.replace('.mp3.mp4','.mp3');}
-    if (fs.existsSync(replaced.replace('.wav.mp4','.wav'))) {return replaced.replace('.wav.mp4','.wav');}
-    if (fs.existsSync(replaced.replace('.avi.mp4','.avi'))) {return replaced.replace('.avi.mp4','.avi');}
-    if (fs.existsSync(replaced.replace('.mkv.mp4','.mkv'))) {return replaced.replace('.mkv.mp4','.mkv');}
-    if (fs.existsSync(replaced.replace('.webm.mp4','.webm'))) {return replaced.replace('.webm.mp4','.webm');}
-    if (fs.existsSync(replaced.replace('.hevc.mp4','.hevc'))) {return replaced.replace('.hevc.mp4','.hevc');}
-    //R3D files
-    p = replaced.split("/");
-    g = replaced.split("/")[p.length-1];
-    g = g.slice(0,g.length-4);
-    p[p.length-1] = g+".RDC";
-    p.push(g+"_001.R3D");
-    p = p.join("/");
+
+    // Split the full res locations by comma and trim any extra spaces
+    const fullResPathList = fullResPaths.split(',').map(s => s.trim()).filter(s => s);
     
-    return p;
+    // Loop over each full res location candidate
+    for (let i = 0; i < fullResPathList.length; i++) {
+        const candidate = fullResPathList[i];
+        const normalizedFullResCandidate = candidate.replace(/\\/g, '/');
+        const replaced = normalizedVideoPath.replace(normalizedProxyPath, normalizedFullResCandidate);
+        if (isProxy) print("Trying full res path: " + replaced);
+        
+        if (fs.existsSync(replaced)) {
+            if (isProxy) print("Found full res file at: " + replaced);
+            return replaced;
+        }
+        
+        // Try common filename variations
+        const variations = [
+            { find: '.mov.mp4', replace: '.mov' },
+            { find: '.MXF.mp4', replace: '.MXF' },
+            { find: '.mp4.mp4', replace: '.mp4' },
+            { find: '.mp3.mp4', replace: '.mp3' },
+            { find: '.wav.mp4', replace: '.wav' },
+            { find: '.avi.mp4', replace: '.avi' },
+            { find: '.mkv.mp4', replace: '.mkv' },
+            { find: '.webm.mp4', replace: '.webm' },
+            { find: '.hevc.mp4', replace: '.hevc' }
+        ];
+        
+        for (let j = 0; j < variations.length; j++) {
+            const variant = replaced.replace(variations[j].find, variations[j].replace);
+            if (fs.existsSync(variant)) {
+                if (isProxy) print("Found full res file with variation (" + variations[j].replace + "): " + variant);
+                return variant;
+            }
+        }
+        
+        // Special handling for R3D files
+        let parts = replaced.split("/");
+        let lastPart = parts[parts.length - 1];
+        let baseName = lastPart.slice(0, lastPart.length - 4);
+        parts[parts.length - 1] = baseName + ".RDC";
+        parts.push(baseName + "_001.R3D");
+        const r3dPath = parts.join("/");
+        if (fs.existsSync(r3dPath)) {
+            if (isProxy) print("Found full res R3D file: " + r3dPath);
+            return r3dPath;
+        }
+    }
+    
+    if (isProxy) print("No matching full resolution file found for video: " + videoPath);
+    return null;
 }
+
 
 
 // Load saved values on page load
@@ -756,3 +790,44 @@ document.getElementById('loadMoreBtn').addEventListener('click', () => {
     displayedCount += 10; // Increment displayed video count by 10
     displayResults(allFiles); // Refresh display with updated count
 });
+
+
+// Get the container element you want to use as a drop zone (e.g. the main app container)
+const dropZone = document.getElementById('app');
+
+// Prevent default behavior for dragover and drop events
+dropZone.addEventListener('dragover', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    // Optionally, add visual feedback (e.g. change background color)
+});
+
+dropZone.addEventListener('drop', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const files = event.dataTransfer.files;
+    
+    // If files are dropped and they include a valid path, use them.
+    if (files && files.length > 0 && files[0].path) {
+        for (let i = 0; i < files.length; i++) {
+            const file = files[i];
+            const filePath = file.path;
+            const fileType = file.type.split('/')[0]; // e.g. "video" or "image"
+            handleFileSearch(filePath, fileType);
+        }
+    } else {
+        // If no file path is available (e.g. when dragging imported Premiere clips),
+        // call an ExtendScript function to retrieve the file path from Premiere.
+        csInterface.evalScript("getSelectedClipFilePath()", (result) => {
+            if (result && result !== "null") {
+                // Assume the dropped clip is a video clip.
+                print(result);
+                handleFileSearch(result, "video");
+            } else {
+                print("No valid file path found from the imported clip.");
+            }
+        });
+    }
+});
+
