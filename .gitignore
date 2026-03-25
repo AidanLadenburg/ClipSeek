@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.env
+.venv/
+venv/
+
+# Build / packaging
+dist/
+build/
+
+# Logs & local env
+*.log
+.env.local
+
+# Node (CEP panel)
+node_modules/
+
+# Embeddings & corpus
+*.pkl
+
+# Cosmos / HF model trees — weights + tokenizer blobs
+# Matches embed_app/cosmos_model, extension/cosmos_model, or any other path named cosmos_model/
+cosmos_model/
+
+# Stray weight files outside that folder
+*.safetensors
+pytorch_model.bin
+*.pt
+*.pth
+*.ckpt
+*.onnx
+
+# PyInstaller search binary 
+extension/python/io.exe

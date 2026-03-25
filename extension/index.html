@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Clip Seek</title>
+    <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+    <div id="app" class="app">
+        <header class="app-header">
+            <h1 class="app-title">Clip Seek</h1>
+            <button type="button" id="settingsBtn" class="btn btn--icon" aria-label="Settings" title="Settings">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M19.14 12.94c.04-.31.06-.63.06-.94 0-.31-.02-.63-.06-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
+            </button>
+        </header>
+
+        <main id="mainPage" class="page">
+            <section class="search-bar" aria-label="Search">
+                <label class="field-label" for="search">Search</label>
+                <div class="search-row">
+                    <input type="text" id="search" class="input input--search" placeholder="Describe a scene, object, or action…" autocomplete="off">
+                    <button type="button" id="searchButton" class="btn btn--icon" aria-label="Search">
+                        <svg class="icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001c.03.04.062.078.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.1zm-5.442-9.1a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11z"/></svg>
+                    </button>
+                    <button type="button" id="uploadButton" class="btn btn--icon" aria-label="Search by image or video file">
+                        <svg class="icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M5 20h14a1 1 0 0 0 1-1v-4h2v4a3 3 0 0 1-3 3H5a3 3 0 0 1-3-3v-4h2v4a1 1 0 0 0 1 1zM13 3.414V16h-2V3.414L8.707 5.707l-1.414-1.414L12 0l4.707 4.707-1.414 1.414L13 3.414z"/></svg>
+                    </button>
+                    <button type="button" id="filterButton" class="btn btn--icon" aria-label="Date filters">
+                        <svg class="icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 17h2a1 1 0 010 2H3a1 1 0 010-2zm5.5 0h11a1 1 0 010 2H8.5a1 1 0 010-2zM3 11h11a1 1 0 010 2H3a1 1 0 010-2zm14.5 0h2a1 1 0 010 2h-2a1 1 0 010-2zM3 5h17a1 1 0 010 2H3a1 1 0 010-2z"/></svg>
+                    </button>
+                </div>
+                <input type="file" id="fileInput" accept="image/*,video/*" hidden>
+                <div id="filterMenu" class="filter-row" hidden>
+                    <label class="field-label" for="dateFrom">From</label>
+                    <input type="date" id="dateFrom" class="input input--date">
+                    <label class="field-label" for="dateTo">To</label>
+                    <input type="date" id="dateTo" class="input input--date">
+                </div>
+            </section>
+
+            <section class="bulk-actions" aria-label="Selection actions">
+                <button type="button" id="importSelectedBtn" class="btn btn--secondary" hidden>Import selected</button>
+                <button type="button" id="searchSimilarBtn" class="btn btn--secondary" hidden>Search similar</button>
+                <button type="button" id="clearSelectedBtn" class="btn btn--ghost" hidden>Clear</button>
+            </section>
+
+            <section id="results" class="results-grid" aria-live="polite"></section>
+            <button type="button" id="loadMoreBtn" class="btn btn--secondary load-more" hidden>Load more</button>
+        </main>
+
+        <div id="settingsPage" class="page page--settings" hidden>
+            <h2 class="section-title">Settings</h2>
+
+            <div class="field">
+                <label class="field-label" for="videoFolderInput">Restrict search to folder (optional)</label>
+                <div class="field-row">
+                    <input type="text" id="videoFolderInput" class="input" placeholder="Path to video root" readonly>
+                    <button type="button" id="videoFolderSelectBtn" class="btn btn--secondary">Browse</button>
+                </div>
+            </div>
+
+            <div class="field">
+                <label class="field-label" for="embeddingFolderInput">Embedding folder</label>
+                <p class="field-hint">Same folder you chose in the Video Embedder (contains <code>.pkl</code> files).</p>
+                <div class="field-row">
+                    <input type="text" id="embeddingFolderInput" class="input" placeholder="Path to embeddings output" readonly>
+                    <button type="button" id="embeddingFolderSelectBtn" class="btn btn--secondary">Browse</button>
+                </div>
+            </div>
+
+            <div class="field">
+                <span class="field-label">Scoring</span>
+                <div class="toggle-row">
+                    <span>Max</span>
+                    <label class="switch">
+                        <input type="checkbox" id="meanMaxSwitch">
+                        <span class="slider round"></span>
+                    </label>
+                    <span>Mean</span>
+                </div>
+            </div>
+
+            <div class="field">
+                <label class="switch-row">
+                    <span class="field-label">Debug messages (Premiere Events)</span>
+                    <label class="switch">
+                        <input type="checkbox" id="debugSwitch">
+                        <span class="slider round"></span>
+                    </label>
+                </label>
+            </div>
+
+            <div class="field">
+                <label class="switch-row">
+                    <span class="field-label">Import using proxy workflow</span>
+                    <label class="switch">
+                        <input type="checkbox" id="proxySwitch">
+                        <span class="slider round"></span>
+                    </label>
+                </label>
+            </div>
+
+            <div id="proxySettings" class="panel panel--nested" hidden>
+                <div class="field">
+                    <label class="field-label" for="proxyLocation">Proxy folder</label>
+                    <div class="field-row">
+                        <input type="text" id="proxyLocation" class="input" placeholder="Proxy media root">
+                        <button type="button" id="proxyLocationSelectBtn" class="btn btn--secondary">Browse</button>
+                    </div>
+                </div>
+                <div class="field">
+                    <label class="field-label" for="fullResLocation">Full-resolution roots (comma-separated)</label>
+                    <div class="field-row">
+                        <input type="text" id="fullResLocation" class="input" placeholder="Paths to camera originals">
+                        <button type="button" id="fullResLocationSelectBtn" class="btn btn--secondary">Browse</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="field">
+                <button type="button" id="annotationPageBtn" class="btn btn--secondary">Annotations…</button>
+            </div>
+
+            <footer class="form-actions">
+                <button type="button" id="saveSettingsBtn" class="btn">Save</button>
+                <button type="button" id="backBtn" class="btn btn--ghost">Back</button>
+            </footer>
+        </div>
+
+        <div id="annotationPage" class="page page--settings" hidden>
+            <h2 class="section-title">Annotations</h2>
+            <div class="field">
+                <label class="field-label" for="annotationFolder">Annotation folder</label>
+                <div class="field-row">
+                    <input type="text" id="annotationFolder" class="input" placeholder="Folder for .anno files" readonly>
+                    <button type="button" id="annotationFolderSelectBtn" class="btn btn--secondary">Browse</button>
+                </div>
+            </div>
+            <div class="field">
+                <label class="field-label" for="annotationKey">Keyword in query</label>
+                <input type="text" id="annotationKey" class="input" placeholder="e.g. brand name">
+            </div>
+            <div class="field">
+                <label class="field-label" for="annotationMedium">Type</label>
+                <select id="annotationMedium" class="input">
+                    <option value="NA">Choose…</option>
+                    <option value="image">Image</option>
+                </select>
+            </div>
+            <div id="annotationTextContainer" class="field" hidden>
+                <label class="field-label" for="annotationText">Text</label>
+                <input type="text" id="annotationText" class="input">
+            </div>
+            <div id="annotationImageContainer" class="field" hidden>
+                <label class="field-label" for="annotationImage">Images</label>
+                <input type="file" id="annotationImage" class="input" accept="image/*" multiple>
+            </div>
+            <div id="annotationVideoContainer" class="field" hidden>
+                <label class="field-label" for="annotationVideo">Video path</label>
+                <input type="text" id="annotationVideo" class="input">
+            </div>
+            <footer class="form-actions">
+                <button type="button" id="saveAnnotationBtn" class="btn">Save annotation</button>
+                <button type="button" id="backToSettingsBtn" class="btn btn--ghost">Back</button>
+            </footer>
+        </div>
+
+        <nav id="contextMenu" class="context-menu" role="menu" aria-hidden="true">
+            <ul>
+                <li id="enlargeOption" role="menuitem">Preview</li>
+                <li id="importOption" role="menuitem">Import</li>
+                <li id="searchSimilarOption" role="menuitem">Search similar</li>
+                <li id="revealInFinderOption" role="menuitem">Reveal in Explorer</li>
+            </ul>
+        </nav>
+
+        <div id="videoModal" class="modal" aria-hidden="true">
+            <div class="modal-content">
+                <button type="button" id="closeModal" class="modal-close" aria-label="Close">&times;</button>
+                <video id="modalVideo" controls></video>
+            </div>
+        </div>
+    </div>
+
+    <script src="./lib/CSInterface.js"></script>
+    <script src="js/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+# Python dependencies for io.py / io.exe (Cosmos-Embed1 search backend)
+torch
+transformers>=4.46
+numpy
+decord
+Pillow
+einops

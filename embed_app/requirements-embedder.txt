@@ -1,0 +1,7 @@
+# Python dependencies for NEW_embedd_app/embed_app.py (batch embedding GUI)
+torch
+transformers>=4.46
+numpy
+decord
+Pillow
+einops
