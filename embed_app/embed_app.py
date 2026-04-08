@@ -488,6 +488,24 @@ class App:
         )
         self.regenerate_cache_btn.pack()
 
+        self.cache_regen_frame = tk.Frame(cache_btn_frame)
+        self.cache_regen_progress = ttk.Progressbar(
+            self.cache_regen_frame,
+            orient="horizontal",
+            length=400,
+            mode="determinate",
+            maximum=100,
+        )
+        self.cache_regen_progress.pack(pady=(6, 2))
+        self.cache_regen_label = tk.Label(
+            self.cache_regen_frame,
+            text="",
+            fg="#333333",
+            font=("Arial", 9),
+            wraplength=520,
+        )
+        self.cache_regen_label.pack()
+
         # Total Progress
         tk.Label(root, text="Total Queue Progress:").pack(pady=(10, 2))
         self.total_progress = ttk.Progressbar(root, orient="horizontal", length=500, mode="determinate")
@@ -644,19 +662,39 @@ class App:
             return
         self.regenerate_cache_btn.config(state=tk.DISABLED)
         self.start_btn.config(state=tk.DISABLED)
+        self._cache_regen_ui_show()
         self.update_status("Regenerating mmap cache from per-video .pkl files...")
         t = threading.Thread(target=self._run_regenerate_cache, args=(output_dir,), daemon=True)
         t.start()
 
+    def _cache_regen_ui_show(self):
+        self.cache_regen_frame.pack(fill="x", pady=(4, 0))
+        self.cache_regen_progress.config(value=0)
+        self.cache_regen_label.config(text="Starting…")
+
+    def _cache_regen_ui_hide(self):
+        self.cache_regen_frame.pack_forget()
+        self.cache_regen_progress.config(value=0)
+        self.cache_regen_label.config(text="")
+
+    def _cache_regen_ui_update(self, frac: float, msg: str):
+        self.cache_regen_progress.config(value=max(0.0, min(100.0, frac * 100.0)))
+        self.cache_regen_label.config(text=msg)
+        self.status_label.config(text=msg)
+
     def _run_regenerate_cache(self, output_dir):
+        def on_progress(frac: float, msg: str):
+            self.root.after(0, lambda f=frac, m=msg: self._cache_regen_ui_update(f, m))
+
         try:
-            n = regenerate_mmap_cache(output_dir)
+            n = regenerate_mmap_cache(output_dir, progress=on_progress)
             self.root.after(0, lambda n=n: self._regenerate_done(None, n))
         except Exception as e:
             logging.exception("Regenerate mmap cache failed")
             self.root.after(0, lambda e=e: self._regenerate_done(e, 0))
 
     def _regenerate_done(self, err, count):
+        self._cache_regen_ui_hide()
         self.regenerate_cache_btn.config(state=tk.NORMAL)
         self.start_btn.config(state=tk.NORMAL)
         if err is not None:

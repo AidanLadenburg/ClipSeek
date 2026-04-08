@@ -16,8 +16,6 @@ from clipseek_video import ClipseekVideo
 
 META_NAME = "cached_embeddings.meta"
 MATRIX_NAME = "cached_embeddings.matrix.npy"
-# Temp file for atomic matrix write. Must end in ".npy" so np.save(path, ...) does not
-# append another ".npy" (e.g. "...matrix.npy.tmp" wrongly became "...matrix.npy.tmp.npy").
 MATRIX_TMP_NAME = "cached_embeddings.matrix.tmp.npy"
 
 

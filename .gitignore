@@ -20,6 +20,8 @@ node_modules/
 
 # Embeddings & corpus
 *.pkl
+cached_embeddings.matrix.npy
+cached_embeddings.meta
 
 # Cosmos / HF model trees — weights + tokenizer blobs
 # Matches embed_app/cosmos_model, extension/cosmos_model, or any other path named cosmos_model/

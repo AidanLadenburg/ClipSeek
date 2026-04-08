@@ -10,7 +10,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 import torch
 
@@ -80,7 +80,10 @@ def _load_one_pkl(p: str):
 
 
 def rebuild_merged_list_from_disk(
-    embeddings_path: str, chunk_size: int = 1000
+    embeddings_path: str,
+    chunk_size: int = 1000,
+    *,
+    on_load_progress: Optional[Callable[[int, int], None]] = None,
 ) -> List[Any]:
     """Load every per-video .pkl and merge by path (same as extension/io.py)."""
     disk_pkls: List[str] = []
@@ -92,15 +95,27 @@ def rebuild_merged_list_from_disk(
         logging.error("Cannot read embedding folder: %s", e)
         return []
 
-    logging.info("Rebuilding merged cache from %d embedding file(s).", len(disk_pkls))
+    total_files = len(disk_pkls)
+    logging.info("Rebuilding merged cache from %d embedding file(s).", total_files)
+
+    if total_files == 0:
+        if on_load_progress:
+            on_load_progress(0, 0)
+        return []
+
+    if on_load_progress:
+        on_load_progress(0, total_files)
 
     all_objects: List[Any] = []
-    for i in range(0, len(disk_pkls), chunk_size):
+    for i in range(0, total_files, chunk_size):
         chunk = disk_pkls[i : i + chunk_size]
         with ThreadPoolExecutor(max_workers=8) as executor:
             loaded = list(filter(None, executor.map(_load_one_pkl, chunk)))
         all_objects.extend(loaded)
         gc.collect()
+        processed = min(i + len(chunk), total_files)
+        if on_load_progress:
+            on_load_progress(processed, total_files)
 
     by_path: Dict[str, Any] = {}
     for obj in all_objects:
@@ -114,15 +129,41 @@ def atomic_write_cache(embeddings_path: str, merged: List[Any]) -> None:
     save_v2_from_objects(merged, embeddings_path)
 
 
-def regenerate_mmap_cache(embeddings_path: str) -> int:
+def regenerate_mmap_cache(
+    embeddings_path: str,
+    *,
+    progress: Optional[Callable[[float, str], None]] = None,
+) -> int:
     """
     Rebuild mmap cache from all per-video .pkl files in ``embeddings_path``.
     Removes legacy ``cached_embeddings.pkl`` if present. Returns number of videos indexed.
+
+    If ``progress`` is set, it is called periodically with ``(fraction_0_to_1, message)``.
     """
+    LOAD_END = 0.88
+
+    def _report(frac: float, msg: str) -> None:
+        if progress:
+            progress(min(1.0, max(0.0, frac)), msg)
+
     os.makedirs(embeddings_path, exist_ok=True)
-    merged = rebuild_merged_list_from_disk(embeddings_path)
+    _report(0.0, "Scanning embedding folder…")
+
+    def _load_progress(processed: int, total: int) -> None:
+        if not total:
+            return
+        frac = LOAD_END * (processed / total)
+        _report(frac, f"Loading embeddings ({processed} / {total} files)…")
+
+    merged = rebuild_merged_list_from_disk(
+        embeddings_path, on_load_progress=_load_progress
+    )
     if merged:
+        _report(0.9, "Writing mmap cache to disk…")
         save_v2_from_objects(merged, embeddings_path)
+        _report(1.0, "Finished.")
+    else:
+        _report(1.0, "No videos to index (folder empty or no valid .pkl files).")
     legacy = os.path.join(embeddings_path, LEGACY_MONOLITHIC_PKL)
     if os.path.isfile(legacy):
         try:
