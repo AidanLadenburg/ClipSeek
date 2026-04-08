@@ -144,6 +144,12 @@
   }
 
   function wireUi() {
+    function getSearchMode() {
+      const el = document.getElementById('searchModeSlider');
+      if (!el) return 'exact';
+      return el.value === '1' ? 'faiss' : 'exact';
+    }
+
     const mainPage = document.getElementById('mainPage');
     const settingsPage = document.getElementById('settingsPage');
     const annotationPage = document.getElementById('annotationPage');
@@ -257,6 +263,7 @@
         query: event.target.value,
         is_mean: isMean,
         query_type: 'text',
+        search_mode: getSearchMode(),
       };
       if (dateFrom && dateTo) {
         searchRequest.date_from = dateFrom;
@@ -289,6 +296,7 @@
           annotation_folder: selectedFolders.annotationFolder,
           file_path: f.path,
           query_type: queryType,
+          search_mode: getSearchMode(),
         });
       });
     });
@@ -480,6 +488,7 @@
               annotation_folder: selectedFolders.annotationFolder,
               file_path: file.path,
               query_type: queryType,
+              search_mode: getSearchMode(),
             });
           });
         }
@@ -495,6 +504,7 @@
                 annotation_folder: selectedFolders.annotationFolder,
                 file_path: result,
                 query_type: 'video',
+                search_mode: getSearchMode(),
               });
             });
           } else sdkLog('No valid file path from clip.');
@@ -508,6 +518,13 @@
     document.getElementById('proxyLocation').value = localStorage.getItem('proxyLocation') || '';
     document.getElementById('fullResLocation').value = localStorage.getItem('fullResLocation') || '';
     document.getElementById('meanMaxSwitch').checked = JSON.parse(localStorage.getItem('isMean') || 'true');
+    const searchModeSlider = document.getElementById('searchModeSlider');
+    if (searchModeSlider) {
+      searchModeSlider.value = localStorage.getItem('searchMode') === 'faiss' ? '1' : '0';
+      searchModeSlider.addEventListener('input', () => {
+        localStorage.setItem('searchMode', searchModeSlider.value === '1' ? 'faiss' : 'exact');
+      });
+    }
     document.getElementById('debugSwitch').checked = getDebugMode();
     document.getElementById('proxySwitch').checked = JSON.parse(localStorage.getItem('isProxy') || 'false');
     refreshProxySection();

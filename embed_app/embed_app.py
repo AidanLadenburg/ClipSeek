@@ -22,6 +22,12 @@ from transformers import AutoModel
 
 from clipseek_video import ClipseekVideo as video_obj
 from clipseek_cosmos_processor import assert_video_processor, load_cosmos_processor
+from embeddings_cache import (
+    CACHE_SAVE_EVERY_N_VIDEOS,
+    CACHE_SAVE_MIN_INTERVAL_SEC,
+    EmbeddingIndexCache,
+    regenerate_mmap_cache,
+)
 
 # --- Logging Setup ---
 def setup_logger():
@@ -44,6 +50,21 @@ def fix_path(path):
 
 def get_file_hash(path):
     return hashlib.md5(fix_path(path).encode('utf-8')).hexdigest()
+
+# Keep flat output folder but avoid basename collisions across subfolders.
+_EMBED_FILENAME_MAX_STEM = 100
+
+def embedding_pkl_filename(video_path):
+    """
+    One .pkl per source file: <stem>_<path_hash>.pkl
+    path_hash is derived from the absolute path (same as processed_files.csv keys).
+    """
+    base = os.path.basename(video_path)
+    stem = os.path.splitext(base)[0] or "video"
+    if len(stem) > _EMBED_FILENAME_MAX_STEM:
+        stem = stem[:_EMBED_FILENAME_MAX_STEM]
+    path_hash = get_file_hash(video_path)[:12]
+    return f"{stem}_{path_hash}.pkl"
 
 # --- AI Logic ---
 class VideoEmbedder:
@@ -69,34 +90,74 @@ class VideoEmbedder:
         self.status_callback = None
         self.total_progress_callback = None
         self.worker_progress_callback = None
-        self.model = None
         self.processor = None
-        
+        # One replica per GPU (data parallel); small models fit on each card without splitting.
+        self._models = None  # type: ignore
+        self._gpu_locks = []
+        self._init_lock = threading.Lock()
+
         # Concurrency Controls
-        self.gpu_lock = threading.Lock() 
         self.progress_lock = threading.Lock()
         self.csv_lock = threading.Lock()
         self.stop_event = threading.Event()
+        self._embedding_index_cache = None
 
-    def load_model(self):
-        if self.model is None:
-            with self.gpu_lock:
-                if self.model is None:
-                    self.update_status(f"Loading Model on {self.device.upper()} ({self.dtype})...")
-                    logging.info(f"Loading Model on {self.device.upper()} ({self.dtype})...")
-                    try:
-                        self.processor = load_cosmos_processor(self.model_id, trust_remote_code=True)
-                        assert_video_processor(self.processor)
-                        self.model = AutoModel.from_pretrained(
-                            self.model_id, 
-                            trust_remote_code=True,
-                            torch_dtype=self.dtype
-                        ).to(self.device)
-                        self.model.eval()
-                    except Exception as e:
-                        logging.error(f"Error loading model: {str(e)}")
-                        self.update_status(f"Error loading model: {str(e)}")
-                        raise e
+    def _dispose_models(self):
+        self._models = None
+        self._gpu_locks = []
+        if torch.cuda.is_available():
+            gc.collect()
+            torch.cuda.empty_cache()
+
+    def load_model(self, max_workers=1):
+        """
+        Load one full model replica per GPU, up to min(max_workers, num_gpus).
+        Workers round-robin across GPUs so independent forwards can run in parallel.
+        """
+        n_target = 1
+        if torch.cuda.is_available() and torch.cuda.device_count() >= 1:
+            n_target = min(max(1, max_workers), torch.cuda.device_count())
+
+        with self._init_lock:
+            if self._models is not None and len(self._models) == n_target:
+                return
+
+            self._dispose_models()
+            self.update_status(
+                f"Loading {n_target} model replica(s) ({self.dtype})..."
+            )
+            logging.info(
+                "Loading %d model replica(s); max_workers=%d, cuda_devices=%s",
+                n_target,
+                max_workers,
+                torch.cuda.device_count() if torch.cuda.is_available() else 0,
+            )
+            try:
+                self.processor = load_cosmos_processor(
+                    self.model_id, trust_remote_code=True
+                )
+                assert_video_processor(self.processor)
+                self._models = []
+                for i in range(n_target):
+                    dev = f"cuda:{i}" if torch.cuda.is_available() else "cpu"
+                    m = AutoModel.from_pretrained(
+                        self.model_id,
+                        trust_remote_code=True,
+                        torch_dtype=self.dtype,
+                    ).to(dev)
+                    m.eval()
+                    self._models.append(m)
+                self._gpu_locks = [threading.Lock() for _ in range(n_target)]
+                if torch.cuda.is_available() and n_target > 1:
+                    logging.info(
+                        "Multi-GPU data parallel: %d independent replicas on cuda:0..cuda:%d",
+                        n_target,
+                        n_target - 1,
+                    )
+            except Exception as e:
+                logging.error(f"Error loading model: {str(e)}")
+                self.update_status(f"Error loading model: {str(e)}")
+                raise e
 
     def update_status(self, message):
         if self.status_callback:
@@ -125,7 +186,14 @@ class VideoEmbedder:
             except Exception as e:
                 logging.error(f"Failed to write cache: {e}")
 
-    def get_vid_feat(self, video_path, chunk_size=10, overlap=0, progress_callback=None):
+    def get_vid_feat(
+        self,
+        video_path,
+        chunk_size=10,
+        overlap=0,
+        progress_callback=None,
+        gpu_index=0,
+    ):
         try:
             vr = decord.VideoReader(video_path)
             fps = vr.get_avg_fps()
@@ -172,22 +240,39 @@ class VideoEmbedder:
                 if frames.shape[0] == 0: continue
 
                 batch = np.transpose(np.expand_dims(frames, 0), (0, 1, 4, 2, 3))
-                
-                with self.gpu_lock:
-                    video_inputs = self.processor(videos=batch)
-                    video_inputs = {k: v.to(self.device) for k, v in video_inputs.items()}
-                    
-                    with torch.amp.autocast(device_type="cuda", dtype=self.dtype):
+
+                if not self._models:
+                    raise RuntimeError("Model not loaded; call load_model() first.")
+
+                gi = gpu_index % len(self._models)
+                model = self._models[gi]
+                lock = self._gpu_locks[gi]
+
+                video_inputs = self.processor(videos=batch)
+                if torch.cuda.is_available():
+                    dev = f"cuda:{gi}"
+                    video_inputs = {k: v.to(dev) for k, v in video_inputs.items()}
+                else:
+                    video_inputs = {k: v.to("cpu") for k, v in video_inputs.items()}
+
+                with lock:
+                    if torch.cuda.is_available():
+                        with torch.cuda.device(gi):
+                            with torch.amp.autocast(
+                                device_type="cuda", dtype=self.dtype
+                            ):
+                                with torch.no_grad():
+                                    video_out = model.get_video_embeddings(
+                                        **video_inputs
+                                    )
+                    else:
                         with torch.no_grad():
-                            video_out = self.model.get_video_embeddings(**video_inputs)
-                    
+                            video_out = model.get_video_embeddings(**video_inputs)
                     chunk_emb = video_out.visual_proj.float().cpu().numpy()
 
                 embeddings.append(chunk_emb)
 
                 del video_inputs, video_out, batch, frames
-                if self.device == "cuda":
-                    torch.cuda.empty_cache()
 
             except Exception as e:
                 logging.error(f"Error chunk {i} in {os.path.basename(video_path)}: {e}")
@@ -204,7 +289,7 @@ class VideoEmbedder:
         if self.stop_event.is_set():
             return
 
-        idx, filename, input_dir, output_dir, chunk_size, overlap = file_info
+        idx, filename, input_dir, output_dir, chunk_size, overlap, gpu_index = file_info
         video_path = os.path.join(input_dir, filename)
         
         thread_id = threading.get_ident()
@@ -217,23 +302,31 @@ class VideoEmbedder:
             logging.info(f"Start processing: {filename}")
             
             vid_obj = video_obj(
-                video_path, 
-                self, 
-                chunk_size=chunk_size, 
+                video_path,
+                self,
+                chunk_size=chunk_size,
                 overlap=overlap,
-                progress_callback=worker_callback
+                progress_callback=worker_callback,
+                gpu_index=gpu_index,
             )
             
             if self.stop_event.is_set():
                 logging.info(f"Aborted save for {filename}")
                 return
 
-            pkl_name = os.path.splitext(filename)[0] + ".pkl"
+            pkl_name = embedding_pkl_filename(video_path)
             output_path = os.path.join(output_dir, pkl_name)
             vid_obj.save(output_path)
             
             file_hash = get_file_hash(video_path)
             self.save_processed_cache(output_dir, file_hash, video_path)
+
+            if self._embedding_index_cache is not None:
+                self._embedding_index_cache.record_completed_video(vid_obj)
+                self._embedding_index_cache.maybe_periodic_save(
+                    CACHE_SAVE_EVERY_N_VIDEOS,
+                    CACHE_SAVE_MIN_INTERVAL_SEC,
+                )
 
             logging.info(f"Finished: {filename}")
 
@@ -250,7 +343,7 @@ class VideoEmbedder:
 
     def process_folder(self, input_dir, output_dir, chunk_size, overlap, max_workers=1):
         self.stop_event.clear()
-        self.load_model()
+        self.load_model(max_workers=max_workers)
         
         valid_extensions = ('.mp4', '.avi', '.mov', '.mkv', '.webm')
         all_files = []
@@ -272,19 +365,27 @@ class VideoEmbedder:
             return
 
         os.makedirs(output_dir, exist_ok=True)
+
+        self._embedding_index_cache = EmbeddingIndexCache(output_dir)
+        self._embedding_index_cache.initialize()
         
         processed_hashes = self.load_processed_cache(output_dir)
-        tasks = []
-        
+        pending = []
+
         for i, (fname, root) in enumerate(all_files):
             fpath = os.path.join(root, fname)
             fhash = get_file_hash(fpath)
-            
+
             if fhash in processed_hashes:
                 if self.total_progress_callback:
-                    self.total_progress_callback(1) 
+                    self.total_progress_callback(1)
             else:
-                tasks.append((i, fname, root, output_dir, chunk_size, overlap))
+                pending.append((i, fname, root, output_dir, chunk_size, overlap))
+
+        n_rep = len(self._models) if self._models else 1
+        tasks = []
+        for j, tup in enumerate(pending):
+            tasks.append(tup + (j % n_rep,))
 
         skipped_count = total_files - len(tasks)
         if skipped_count > 0:
@@ -293,9 +394,14 @@ class VideoEmbedder:
         logging.info(f"Starting processing {len(tasks)} files with {max_workers} workers.")
         self.update_status(f"Queued {len(tasks)} files (Skipped {skipped_count}). Starting...")
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(self.process_single_video, task) for task in tasks]
-            concurrent.futures.wait(futures)
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [executor.submit(self.process_single_video, task) for task in tasks]
+                concurrent.futures.wait(futures)
+        finally:
+            if self._embedding_index_cache is not None:
+                self._embedding_index_cache.final_save()
+                self._embedding_index_cache = None
 
         if self.stop_event.is_set():
             self.update_status("Processing Stopped.")
@@ -309,7 +415,7 @@ class App:
     def __init__(self, root):
         self.root = root
         self.root.title("Video Embedder Tool")
-        self.root.geometry("600x750") # Slightly taller for extra button
+        self.root.geometry("600x800")
         
         self.config_file = "config.json"
         
@@ -369,6 +475,18 @@ class App:
         
         self.stop_btn = tk.Button(btn_frame, text="STOP", command=self.stop_process, bg="#ffcccc", height=2, width=10, state=tk.DISABLED)
         self.stop_btn.pack(side=tk.LEFT, padx=5)
+
+        cache_btn_frame = tk.Frame(root)
+        cache_btn_frame.pack(pady=(0, 8))
+        self.regenerate_cache_btn = tk.Button(
+            cache_btn_frame,
+            text="Regenerate mmap cache",
+            command=self.regenerate_cache_clicked,
+            bg="#e8f4fc",
+            height=2,
+            width=28,
+        )
+        self.regenerate_cache_btn.pack()
 
         # Total Progress
         tk.Label(root, text="Total Queue Progress:").pack(pady=(10, 2))
@@ -508,6 +626,46 @@ class App:
             self.status_label.config(text="Stopping... Waiting for current chunks to finish.")
             self.stop_btn.config(state=tk.DISABLED)
 
+    def regenerate_cache_clicked(self):
+        output_dir = self.output_entry.get().strip()
+        if not output_dir:
+            messagebox.showerror("Error", "Select an output embedding folder first.")
+            return
+        if not os.path.isdir(output_dir):
+            messagebox.showerror("Error", "Output folder does not exist.")
+            return
+        if not messagebox.askyesno(
+            "Regenerate mmap cache",
+            "Rebuild cached_embeddings.matrix.npy and cached_embeddings.meta from all "
+            "per-video .pkl files in the output folder?\n\n"
+            "This can take a long time for very large libraries. "
+            "Legacy cached_embeddings.pkl will be removed if present.",
+        ):
+            return
+        self.regenerate_cache_btn.config(state=tk.DISABLED)
+        self.start_btn.config(state=tk.DISABLED)
+        self.update_status("Regenerating mmap cache from per-video .pkl files...")
+        t = threading.Thread(target=self._run_regenerate_cache, args=(output_dir,), daemon=True)
+        t.start()
+
+    def _run_regenerate_cache(self, output_dir):
+        try:
+            n = regenerate_mmap_cache(output_dir)
+            self.root.after(0, lambda n=n: self._regenerate_done(None, n))
+        except Exception as e:
+            logging.exception("Regenerate mmap cache failed")
+            self.root.after(0, lambda e=e: self._regenerate_done(e, 0))
+
+    def _regenerate_done(self, err, count):
+        self.regenerate_cache_btn.config(state=tk.NORMAL)
+        self.start_btn.config(state=tk.NORMAL)
+        if err is not None:
+            messagebox.showerror("Regenerate cache failed", str(err))
+            self.update_status("Regenerate cache failed.")
+        else:
+            messagebox.showinfo("Done", f"Mmap cache rebuilt ({count} videos).")
+            self.update_status(f"Mmap cache rebuilt ({count} videos).")
+
     def start_thread(self):
         input_dir = self.input_entry.get()
         output_dir = self.output_entry.get()
@@ -543,6 +701,7 @@ class App:
         self.setup_worker_ui(workers)
         self.start_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
+        self.regenerate_cache_btn.config(state=tk.DISABLED)
         
         t = threading.Thread(target=self.run_process, args=(input_dir, output_dir, chunk_size, overlap, workers))
         t.start()
@@ -552,6 +711,7 @@ class App:
         
         self.root.after(0, lambda: self.start_btn.config(state=tk.NORMAL))
         self.root.after(0, lambda: self.stop_btn.config(state=tk.DISABLED))
+        self.root.after(0, lambda: self.regenerate_cache_btn.config(state=tk.NORMAL))
         if not self.embedder.stop_event.is_set():
             messagebox.showinfo("Success", "Processing Finished!")
 

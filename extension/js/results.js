@@ -162,6 +162,12 @@ function createResultsController({ csInterface, getFullResPath, sdkLog }) {
     updateBulkActionVisibility();
   }
 
+  function getSearchMode() {
+    const el = document.getElementById('searchModeSlider');
+    if (!el) return 'exact';
+    return el.value === '1' ? 'faiss' : 'exact';
+  }
+
   function searchSimilar(bridge, selectedFolders, queryPath) {
     let query = queryPath;
     if (!query && selectedVideos.size > 0) {
@@ -181,6 +187,7 @@ function createResultsController({ csInterface, getFullResPath, sdkLog }) {
       query,
       is_mean: 'true',
       query_type: 'video',
+      search_mode: getSearchMode(),
     };
     if (dateFrom && dateTo) {
       searchRequest.date_from = dateFrom;

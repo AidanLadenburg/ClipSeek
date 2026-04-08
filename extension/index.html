@@ -82,6 +82,16 @@
             </div>
 
             <div class="field">
+                <label class="field-label" for="searchModeSlider">Search mode</label>
+                <p class="field-hint">Exact runs full batched similarity over every chunk. FAISS uses approximate nearest neighbors to pick candidate videos, then reranks with the same exact scores on those candidates (faster at very large scale; install <code>faiss-cpu</code>).</p>
+                <div class="toggle-row search-mode-row">
+                    <span>Exact</span>
+                    <input type="range" id="searchModeSlider" min="0" max="1" step="1" value="0" aria-valuemin="0" aria-valuemax="1" aria-label="Exact or FAISS search">
+                    <span>FAISS</span>
+                </div>
+            </div>
+
+            <div class="field">
                 <label class="switch-row">
                     <span class="field-label">Debug messages (Premiere Events)</span>
                     <label class="switch">

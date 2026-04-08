@@ -6,35 +6,42 @@ Semantic video search for Adobe Premiere Pro: embed your library with **Cosmos-E
 
 | Piece | Role |
 |--------|------|
-| **`embed_app/`** | Standalone embedder GUI (`embed_app.py`). Walks a video folder, writes one `.pkl` per source file into your output folder (plus `processed_files.csv`). Includes its own copies of shared pickle/processor helpers. |
-| **`extension/`** | CEP panel (`index.html`, `js/`, `jsx/`, `lib/`, `CSXS/`). Spawns **`io.exe`** (or `python io.py`) from this folder and sends JSON search commands over stdin. Includes **`io.py`** plus copies of **`cosmos_embedder.py`**, **`clipseek_cosmos_processor.py`**, and **`clipseek_video.py`** so the panel is self-contained when copied into Premiere’s extensions directory. |
-| **`extension/io.py`** | Loads Cosmos-Embed1, loads all corpus `.pkl` files, runs similarity search, prints JSON results on stdout. |
+| **`embed_app/`** | Standalone embedder GUI (`embed_app.py`). Walks a video folder recursively, writes **one `.pkl` per video** into the output folder, maintains **`processed_files.csv`**, and builds a **mmap corpus cache** (`cached_embeddings.matrix.npy` + `cached_embeddings.meta`) so the Premiere search backend can load quickly. |
+| **`extension/`** | CEP panel (`index.html`, `js/`, `jsx/`, `lib/`, `CSXS/`). Spawns **`io.exe`** (or `python io.py`) and sends JSON search commands over stdin. Includes **`io.py`** and copies of shared Python modules so the panel is self-contained when copied into Premiere’s extensions directory. |
+| **`extension/io.py`** | Loads Cosmos-Embed1, loads embeddings from the mmap cache (or per-video `.pkl` files), runs similarity search, prints JSON on stdout. Supports **exact batched** search and optional **FAISS** approximate candidates + exact rerank (see Settings in the panel). |
 
-The embedder and the panel are intentionally separate: you run embedding once (or when new media arrives); editors only need Premiere and the packaged search binary (or Python for dev).
+The embedder and the panel are separate: you run embedding when needed; editors only need Premiere and the search backend.
 
 ## Quick start
 
 1. **Model weights**  
-   - Run once from the repo root:  
+   - From the repo root:  
      `python embed_app/download.py`  
-     This downloads into **`embed_app/cosmos_model/`** (gitignored).  
-   - For search only, you can instead place **`cosmos_model`** next to **`extension/io.py`** (i.e. `extension/cosmos_model/`), or rely on the hub if online.
+     Downloads into **`embed_app/cosmos_model/`** (gitignored).  
+   - For search only, place **`cosmos_model`** next to **`extension/io.py`** (`extension/cosmos_model/`), or rely on the Hugging Face hub if online.
 
 2. **Embed videos**  
-   - From the repo root:  
-     `python embed_app/embed_app.py`  
-   - Install deps: `pip install -r embed_app/requirements-embedder.txt`  
-   - Set input folder, output folder, chunk size (default 10s), overlap, workers, then start. Outputs are **`basename.pkl`** files in the output directory.
+   - Install: `pip install -r embed_app/requirements-embedder.txt`  
+   - Run: `python embed_app/embed_app.py`  
+   - Set **input** folder, **output** (embedding) folder, chunk size (default 10s), overlap, and **workers**.  
+   - **Workers ≥ number of GPUs** loads one full model replica per GPU (data parallel).  
+   - Output per video: **`<stem>_<12-char-hash>.pkl`** in a **flat** output folder (hash avoids basename collisions across subfolders).  
+   - The app **updates the mmap corpus cache** while embedding (and on stop/finish). Use **Regenerate mmap cache** if you need to rebuild it manually.
 
 3. **Premiere panel**  
-   - Copy the entire **`extension/`** folder into your CEP extensions directory (keep internal layout: `index.html`, `js/`, `lib/`, `jsx/`, `css/`, `CSXS/`, and the Python files next to `index.html` if you use `io.py`).  
-   - In settings, set **Embedding folder** to the same output folder as step 2.  
+   - Copy the entire **`extension/`** folder into your CEP extensions directory (keep `index.html`, `js/`, `css/`, `lib/`, `jsx/`, `CSXS/`, and Python files beside `index.html` if you use `io.py`).  
+   - In settings, set **Embedding folder** to the embedder output folder (contains per-video `.pkl` files and the mmap cache).  
    - **Production:** place **`io.exe`** under **`extension/python/io.exe`** (see `extension/js/bridge.js`).  
-   - **Dev without a build:** omit `io.exe`; the panel runs **`extension/io.py`** with `python` if it sits next to `index.html`. Use **`CLIPSEEK_PYTHON`** if `python` is not on PATH.  
-   - Search backend deps: `pip install -r extension/requirements-search.txt`
+   - **Dev:** omit `io.exe`; the panel runs **`extension/io.py`**. Set **`CLIPSEEK_PYTHON`** if `python` is not on PATH.  
+   - Search deps: `pip install -r extension/requirements-search.txt` (includes **`faiss-cpu`** for optional approximate search).
 
 4. **Search**  
-   - Type a query and press Enter, or use upload / drag-and-drop for image or video similarity search.
+   - Type a query (Enter) or use upload / drag-and-drop for image or video similarity.  
+   - **Settings → Search mode:** **Exact** = full batched similarity over all chunks (accurate). **FAISS** = approximate nearest-neighbor probe to pick candidate videos, then **exact** scores on those candidates (faster on very large libraries). Annotation-assisted text queries always use the exact path.
+
+## Corpus cache (mmap)
+
+The search backend prefers **`cached_embeddings.matrix.npy`** + **`cached_embeddings.meta`** (float32 matrix + manifest). Startup mmap-loads this instead of unpickling a huge monolithic file. The embedder writes/updates this format; use **Regenerate mmap cache** in the embedder UI if the index is stale or corrupted.
 
 ## Building `io.exe` (PyInstaller)
 
@@ -45,48 +52,47 @@ cd extension
 pyinstaller --onefile io.py --add-data "cosmos_model;cosmos_model"
 ```
 
-Bundle **`cosmos_embedder.py`**, **`clipseek_video.py`**, **`clipseek_cosmos_processor.py`**, and the **`cosmos_model`** directory (or ship `cosmos_model` beside the exe). Paths are resolved from the directory containing `io.py` / the frozen executable; the loader also checks **`../embed_app/cosmos_model`** when both folders sit in the same repo checkout.
+Include **`cosmos_model`** beside the executable (or ship under `extension/`). Also bundle **`embed_cache_v2.py`** (imported by `io.py`)—PyInstaller usually follows imports; add **`--hidden-import`** for **`faiss`** if the frozen build misses it. Same repo layout: the loader can fall back to **`../embed_app/cosmos_model`**.
 
 ## Shared code (duplicated on purpose)
 
-These files exist in **both** `extension/` and `embed_app/` so each tree can be copied or packaged alone:
+These exist in **both** `extension/` and `embed_app/` so each tree can be copied or packaged alone:
 
-- `clipseek_video.py` — pickle record + loader  
+- `clipseek_video.py` — on-disk embedding record + unpickler  
 - `clipseek_cosmos_processor.py` — Cosmos processor wiring  
-- `cosmos_embedder.py` — model load + text/image/video embeddings (with sibling-folder fallback for `cosmos_model`)
+- `cosmos_embedder.py` — model load + text/image/video embeddings  
+- `embed_cache_v2.py` — mmap matrix + meta read/write (search + embed cache)
 
-Keep them in sync when you change embedding or search behavior.
+Keep them in sync when you change embedding or on-disk formats.
 
-## Legacy notes
-
-- An older **InternVideo2** + BERT stack (`load_model.py`, `backbones/`, `gui.py`) lived in this repo; it has been removed. Search is **Cosmos-only** and expects **`.pkl`** embeddings from **`embed_app/embed_app.py`**.  
-- Old corpus files named **`{md5}.qpl`** are not used by the current `io.py`.
-
-## Repo layout
+## Repo layout (overview)
 
 ```text
-Clipseek/
+ClipSeek/
   README.md
   embed_app/
-    embed_app.py              # Tk embedder GUI
-    download.py               # HF download → embed_app/cosmos_model/
-    clipseek_video.py         # (copy) shared with extension
+    embed_app.py
+    embeddings_cache.py       # mmap cache during / after embedding
+    embed_cache_v2.py
+    download.py
+    clipseek_video.py
     clipseek_cosmos_processor.py
     cosmos_embedder.py
     requirements-embedder.txt
     cosmos_model/             # optional local weights (gitignored)
   extension/
-    io.py                     # Search backend
+    io.py
+    embed_cache_v2.py
     index.html, js/, css/, lib/, jsx/, CSXS/
-    cosmos_embedder.py        # (copy) same folder as io.py for CEP
+    cosmos_embedder.py
     clipseek_video.py
     clipseek_cosmos_processor.py
     requirements-search.txt
 ```
 
-## What to commit (Git)
+## What to commit
 
-The **`.gitignore`** is set up so you mainly commit **source and small configs**: Python/JS/CEP assets, `requirements*.txt`, manifests, etc. It excludes **`cosmos_model/`** (full tree, including tokenizer/weight blobs), **embeddings (`*.pkl`)**, **logs**, **`node_modules`**, **PyInstaller output** (`extension/python/io.exe`), and common **checkpoint extensions** (`.safetensors`, `.pt`, `.pth`, …) if they appear outside an ignored folder. Run `git status` before pushing; if a large or licensed binary shows up, add a pattern or move it under an ignored path.
+**`.gitignore`** excludes large or generated assets: **`cosmos_model/`**, **`*.pkl`**, **mmap cache files** (`cached_embeddings.matrix.npy`, `cached_embeddings.meta`), **logs**, **`node_modules`**, **`extension/python/io.exe`**, and common weight extensions. Run **`git status`** before pushing; do not commit downloaded model trees or customer embedding folders.
 
 ## License / third party
 

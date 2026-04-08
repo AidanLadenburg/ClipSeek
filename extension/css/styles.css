@@ -125,6 +125,12 @@ body {
   flex-wrap: wrap;
 }
 
+.search-mode-row input[type='range'] {
+  flex: 1;
+  min-width: 120px;
+  max-width: 240px;
+}
+
 .switch-row {
   justify-content: space-between;
   width: 100%;

@@ -5,3 +5,4 @@ numpy
 decord
 Pillow
 einops
+faiss-cpu
