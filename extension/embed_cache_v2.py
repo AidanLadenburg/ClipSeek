@@ -16,6 +16,9 @@ from clipseek_video import ClipseekVideo
 
 META_NAME = "cached_embeddings.meta"
 MATRIX_NAME = "cached_embeddings.matrix.npy"
+# Temp file for atomic matrix write. Must end in ".npy" so np.save(path, ...) does not
+# append another ".npy" (e.g. "...matrix.npy.tmp" wrongly became "...matrix.npy.tmp.npy").
+MATRIX_TMP_NAME = "cached_embeddings.matrix.tmp.npy"
 
 
 def chunks_to_numpy_2d(chunks: Any) -> np.ndarray:
@@ -115,8 +118,16 @@ def save_v2_from_objects(objects: List[Any], embeddings_path: str) -> None:
 
     matrix_path = os.path.join(embeddings_path, MATRIX_NAME)
     meta_path = os.path.join(embeddings_path, META_NAME)
-    tmp_m = matrix_path + ".tmp"
+    tmp_m = os.path.join(embeddings_path, MATRIX_TMP_NAME)
     tmp_meta = meta_path + ".tmp"
+
+    # Remove stale/intermediate names from older saves or failed runs.
+    for stale in (matrix_path + ".tmp", matrix_path + ".tmp.npy"):
+        try:
+            if os.path.isfile(stale):
+                os.remove(stale)
+        except OSError:
+            pass
 
     np.save(tmp_m, big)
     os.replace(tmp_m, matrix_path)
