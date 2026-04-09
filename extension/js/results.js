@@ -2,6 +2,32 @@
 
 const path = require('path');
 
+/**
+ * `position:fixed` is viewport-relative; must use clientX/Y (not pageX/Y) or the menu
+ * drifts by scroll amount and ends up off-screen for lower rows.
+ */
+function positionContextMenu(menu, clientX, clientY) {
+  const pad = 6;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  menu.style.display = 'block';
+  let x = clientX;
+  let y = clientY;
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+  const r = menu.getBoundingClientRect();
+  if (r.right > vw - pad) {
+    x -= r.right - (vw - pad);
+  }
+  if (r.bottom > vh - pad) {
+    y -= r.bottom - (vh - pad);
+  }
+  if (x < pad) x = pad;
+  if (y < pad) y = pad;
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+}
+
 function createResultsController({ csInterface, getFullResPath, sdkLog }) {
   const selectedVideos = new Set();
   let displayedCount = 20;
@@ -161,9 +187,7 @@ function createResultsController({ csInterface, getFullResPath, sdkLog }) {
         event.preventDefault();
         const menu = document.getElementById('contextMenu');
         window.__clipseekContext = { videoPath: vid, time };
-        menu.style.display = 'block';
-        menu.style.left = `${event.pageX}px`;
-        menu.style.top = `${event.pageY}px`;
+        positionContextMenu(menu, event.clientX, event.clientY);
       });
 
       const titleDiv = document.createElement('div');
@@ -209,9 +233,9 @@ function createResultsController({ csInterface, getFullResPath, sdkLog }) {
   }
 
   function getSearchMode() {
-    const el = document.getElementById('searchModeSlider');
+    const el = document.getElementById('searchModeSwitch');
     if (!el) return 'exact';
-    return el.value === '1' ? 'faiss' : 'exact';
+    return el.checked ? 'faiss' : 'exact';
   }
 
   function searchSimilar(bridge, selectedFolders, queryPath) {

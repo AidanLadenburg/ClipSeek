@@ -296,7 +296,9 @@ class VideoEmbedder:
         
         def worker_callback(curr, total):
             if self.worker_progress_callback:
-                self.worker_progress_callback(thread_id, filename, curr, total)
+                self.worker_progress_callback(
+                    thread_id, filename, curr, total, gpu_index
+                )
 
         try:
             logging.info(f"Start processing: {filename}")
@@ -582,6 +584,13 @@ class App:
     def update_status(self, text):
         self.root.after(0, lambda: self.status_label.config(text=text))
 
+    @staticmethod
+    def _device_label_for_task_gpu(gpu_index):
+        """Replica index matches cuda:{index} when CUDA is used; otherwise CPU."""
+        if not torch.cuda.is_available():
+            return "CPU"
+        return f"cuda:{int(gpu_index)}"
+
     def setup_worker_ui(self, num_workers):
         for widget in self.worker_frame.winfo_children():
             widget.destroy()
@@ -593,7 +602,7 @@ class App:
             frame = tk.Frame(self.worker_frame)
             frame.pack(fill="x", padx=20, pady=2)
             
-            lbl = tk.Label(frame, text=f"Worker {i+1}: Idle", width=30, anchor="w", font=("Arial", 8))
+            lbl = tk.Label(frame, text=f"Worker {i+1}: Idle", width=42, anchor="w", font=("Arial", 8))
             lbl.pack(side=tk.LEFT)
             
             pb = ttk.Progressbar(frame, orient="horizontal", length=300, mode="determinate")
@@ -601,10 +610,15 @@ class App:
             
             self.worker_widgets.append((lbl, pb))
 
-    def update_worker_bar(self, thread_id, filename, current, total):
-        self.root.after(0, lambda: self._update_worker_ui_safe(thread_id, filename, current, total))
+    def update_worker_bar(self, thread_id, filename, current, total, gpu_index=0):
+        self.root.after(
+            0,
+            lambda ti=thread_id, fn=filename, c=current, t=total, g=gpu_index: self._update_worker_ui_safe(
+                ti, fn, c, t, g
+            ),
+        )
 
-    def _update_worker_ui_safe(self, thread_id, filename, current, total):
+    def _update_worker_ui_safe(self, thread_id, filename, current, total, gpu_index=0):
         if thread_id not in self.worker_ui_map:
             slot_idx = len(self.worker_ui_map) 
             if slot_idx < len(self.worker_widgets):
@@ -616,7 +630,7 @@ class App:
         lbl, pb = self.worker_widgets[slot_idx]
         
         short_name = (filename[:25] + '..') if len(filename) > 25 else filename
-        lbl.config(text=f"Worker {slot_idx+1}: {short_name}")
+        dev = self._device_label_for_task_gpu(gpu_index)
         
         if total > 0:
             pct = (current / total) * 100
@@ -625,6 +639,10 @@ class App:
         if current >= total:
             lbl.config(text=f"Worker {slot_idx+1}: Idle")
             pb.config(value=0)
+        else:
+            lbl.config(
+                text=f"Worker {slot_idx+1} [{dev}]: {short_name}",
+            )
 
     def increment_total_bar(self, increment_val):
         self.total_processed_count += increment_val

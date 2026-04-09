@@ -171,9 +171,9 @@
 
   function wireUi() {
     function getSearchMode() {
-      const el = document.getElementById('searchModeSlider');
+      const el = document.getElementById('searchModeSwitch');
       if (!el) return 'exact';
-      return el.value === '1' ? 'faiss' : 'exact';
+      return el.checked ? 'faiss' : 'exact';
     }
 
     const mainPage = document.getElementById('mainPage');
@@ -549,11 +549,11 @@
     document.getElementById('proxyLocation').value = localStorage.getItem('proxyLocation') || '';
     document.getElementById('fullResLocation').value = localStorage.getItem('fullResLocation') || '';
     document.getElementById('meanMaxSwitch').checked = JSON.parse(localStorage.getItem('isMean') || 'true');
-    const searchModeSlider = document.getElementById('searchModeSlider');
-    if (searchModeSlider) {
-      searchModeSlider.value = localStorage.getItem('searchMode') === 'faiss' ? '1' : '0';
-      searchModeSlider.addEventListener('input', () => {
-        localStorage.setItem('searchMode', searchModeSlider.value === '1' ? 'faiss' : 'exact');
+    const searchModeSwitch = document.getElementById('searchModeSwitch');
+    if (searchModeSwitch) {
+      searchModeSwitch.checked = localStorage.getItem('searchMode') === 'faiss';
+      searchModeSwitch.addEventListener('change', () => {
+        localStorage.setItem('searchMode', searchModeSwitch.checked ? 'faiss' : 'exact');
       });
     }
     document.getElementById('debugSwitch').checked = getDebugMode();
