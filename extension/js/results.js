@@ -19,13 +19,59 @@ function createResultsController({ csInterface, getFullResPath, sdkLog }) {
     });
   }
 
-  function displayResults(files) {
-    allFiles = files;
+  function displayResults(data) {
     const resultsDiv = document.getElementById('results');
+    const metaLine = document.getElementById('searchMetaLine');
+    let files = data;
+    let meta = null;
+
+    if (Array.isArray(data)) {
+      files = data;
+    } else if (data && typeof data === 'object') {
+      if (Array.isArray(data.results)) {
+        files = data.results;
+        meta = data;
+      } else {
+        files = [];
+        meta = data.error ? data : null;
+      }
+    }
+
+    if (metaLine) {
+      if (meta && typeof meta.search_seconds === 'number') {
+        const parts = [`total ${meta.search_seconds.toFixed(2)}s`];
+        if (typeof meta.load_seconds === 'number') {
+          parts.push(`cache load ${meta.load_seconds.toFixed(2)}s`);
+        }
+        if (typeof meta.retrieve_seconds === 'number') {
+          parts.push(`similarity ${meta.retrieve_seconds.toFixed(2)}s`);
+        }
+        let modeLabel = 'Exact GPU batched similarity';
+        if (meta.faiss_used) {
+          modeLabel = 'FAISS approximate + exact GPU rerank';
+        } else if (meta.faiss_requested && meta.faiss_available === false) {
+          modeLabel = 'Exact (install faiss-cpu for FAISS mode)';
+        } else if (meta.faiss_requested && !meta.faiss_used && meta.faiss_available) {
+          modeLabel = 'Exact (FAISS not used for this query — see io log if unexpected)';
+        }
+        if (meta.search_note) {
+          modeLabel = meta.search_note;
+        }
+        metaLine.textContent = `${modeLabel} · ${parts.join(' · ')}`;
+        metaLine.hidden = false;
+        sdkLog(`ClipSeek: ${modeLabel}. ${parts.join(', ')}.`);
+      } else {
+        metaLine.hidden = true;
+        metaLine.textContent = '';
+      }
+    }
+
+    allFiles = files;
     resultsDiv.innerHTML = '';
 
     if (!files.length) {
-      resultsDiv.innerHTML = '<p class="results-empty">No videos found.</p>';
+      resultsDiv.innerHTML =
+        '<p class="results-empty">' + (meta && meta.error ? 'Search failed.' : 'No videos found.') + '</p>';
       return;
     }
 

@@ -1,4 +1,5 @@
 # Python dependencies for io.py / io.exe (Cosmos-Embed1 search backend)
+# faiss-cpu: optional but recommended — enables "FAISS" search mode in the panel (approximate ANN + GPU rerank).
 torch
 transformers>=4.46
 numpy

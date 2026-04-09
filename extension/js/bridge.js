@@ -4,6 +4,8 @@ const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
+const CLIPSEEK_UI_PREFIX = 'CLIPSEEK_UI ';
+
 /**
  * Resolve search backend: packaged io.exe, or io.py + Python for local testing.
  * - Put io.exe under extension/python/io.exe for production (paths are relative to this file in extension/js/).
@@ -52,7 +54,26 @@ function resolveSearchBackend(sdkLog) {
   };
 }
 
-function createSearchBridge({ sdkLog, getDebugMode }) {
+function parseClipseekUiLine(line, onClipseekUiEvent, getDebugMode, sdkLog) {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith(CLIPSEEK_UI_PREFIX)) return;
+  try {
+    const payload = JSON.parse(trimmed.slice(CLIPSEEK_UI_PREFIX.length));
+    if (onClipseekUiEvent && payload && typeof payload.message === 'string') {
+      onClipseekUiEvent(payload);
+    }
+  } catch (e) {
+    if (getDebugMode && sdkLog) sdkLog('ClipSeek: bad UI line: ' + trimmed);
+  }
+}
+
+function createSearchBridge({
+  sdkLog,
+  getDebugMode,
+  onClipseekUiEvent,
+  onPythonReady,
+  onPythonStop,
+}) {
   let pythonProcess = null;
   let processReady = false;
   let stdoutBuffer = '';
@@ -64,10 +85,15 @@ function createSearchBridge({ sdkLog, getDebugMode }) {
       stdoutBuffer = lines.pop() || '';
       for (const line of lines) {
         if (!line.trim()) continue;
+        if (line.trim().startsWith(CLIPSEEK_UI_PREFIX)) {
+          parseClipseekUiLine(line, onClipseekUiEvent, getDebugMode, sdkLog);
+          continue;
+        }
         try {
           const result = JSON.parse(line);
           if (result.error) sdkLog('Python: ' + result.error);
-          else onJsonLine(result);
+          /* Search responses may include both error and results[] — always pass through. */
+          onJsonLine(result);
         } catch {
           /* non-JSON log lines */
         }
@@ -96,14 +122,25 @@ function createSearchBridge({ sdkLog, getDebugMode }) {
     });
 
     await new Promise((resolve, reject) => {
+      let bootBuf = '';
       function onBoot(data) {
-        const text = data.toString();
-        if (getDebugMode()) sdkLog(text.trim());
-        if (text.includes('READY')) {
-          processReady = true;
-          sdkLog('Model loaded');
-          pythonProcess.stdout.removeListener('data', onBoot);
-          resolve();
+        bootBuf += data.toString();
+        const parts = bootBuf.split('\n');
+        bootBuf = parts.pop() || '';
+        for (const line of parts) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          if (getDebugMode()) sdkLog(trimmed);
+          if (trimmed.startsWith(CLIPSEEK_UI_PREFIX)) {
+            parseClipseekUiLine(line, onClipseekUiEvent, getDebugMode, sdkLog);
+          }
+          if (trimmed === 'READY') {
+            processReady = true;
+            if (onPythonReady) onPythonReady(true);
+            pythonProcess.stdout.removeListener('data', onBoot);
+            resolve();
+            return;
+          }
         }
       }
       pythonProcess.stdout.on('data', onBoot);
@@ -138,6 +175,7 @@ function createSearchBridge({ sdkLog, getDebugMode }) {
       pythonProcess = null;
       processReady = false;
       stdoutBuffer = '';
+      if (onPythonStop) onPythonStop();
     }
   }
 

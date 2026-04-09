@@ -128,7 +128,33 @@
     }
   }
 
-  const bridge = createSearchBridge({ sdkLog, getDebugMode });
+  function setClipseekReadyIndicator(state) {
+    const dot = document.getElementById('clipseekReadyDot');
+    if (!dot) return;
+    dot.classList.remove('ready-dot--pending', 'ready-dot--ready');
+    if (state === 'ready') {
+      dot.classList.add('ready-dot--ready');
+      dot.title = 'ClipSeek: model and cache ready — you can search.';
+    } else {
+      dot.classList.add('ready-dot--pending');
+      dot.title =
+        state === 'stopped'
+          ? 'ClipSeek: search backend stopped.'
+          : 'ClipSeek: loading model and embedding cache…';
+    }
+  }
+
+  const bridge = createSearchBridge({
+    sdkLog,
+    getDebugMode,
+    onClipseekUiEvent: (payload) => {
+      if (payload && typeof payload.message === 'string') {
+        sdkLog(payload.message);
+      }
+    },
+    onPythonReady: () => setClipseekReadyIndicator('ready'),
+    onPythonStop: () => setClipseekReadyIndicator('stopped'),
+  });
   const results = createResultsController({ csInterface, getFullResPath, sdkLog });
 
   let selectedFolders = {
@@ -156,6 +182,8 @@
     if (!mainPage || !settingsPage || !annotationPage) {
       throw new Error('Missing #mainPage, #settingsPage, or #annotationPage — index.html mismatch?');
     }
+
+    setClipseekReadyIndicator('pending');
 
     ensureBridgeReady().catch((err) => {
       console.error(err);
@@ -296,6 +324,7 @@
           annotation_folder: selectedFolders.annotationFolder,
           file_path: f.path,
           query_type: queryType,
+          is_mean: JSON.parse(localStorage.getItem('isMean') || 'true'),
           search_mode: getSearchMode(),
         });
       });
@@ -488,6 +517,7 @@
               annotation_folder: selectedFolders.annotationFolder,
               file_path: file.path,
               query_type: queryType,
+              is_mean: JSON.parse(localStorage.getItem('isMean') || 'true'),
               search_mode: getSearchMode(),
             });
           });
@@ -504,6 +534,7 @@
                 annotation_folder: selectedFolders.annotationFolder,
                 file_path: result,
                 query_type: 'video',
+                is_mean: JSON.parse(localStorage.getItem('isMean') || 'true'),
                 search_mode: getSearchMode(),
               });
             });

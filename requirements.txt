@@ -1,0 +1,3 @@
+# ClipSeek Python dependencies — search backend (extension/io.py) and related.
+# For a focused list see extension/requirements-search.txt
+-r extension/requirements-search.txt

@@ -49,6 +49,31 @@ body {
   border-bottom: 1px solid var(--border);
 }
 
+.app-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.ready-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  transition: background 0.25s ease, box-shadow 0.25s ease;
+}
+
+.ready-dot--pending {
+  background: #495057;
+  box-shadow: none;
+}
+
+.ready-dot--ready {
+  background: var(--success);
+  box-shadow: 0 0 10px rgba(81, 207, 102, 0.65);
+}
+
 .app-title {
   margin: 0;
   font-size: 1.35rem;
@@ -73,6 +98,17 @@ body {
   margin: 0 0 16px;
   font-size: 1.1rem;
   font-weight: 600;
+}
+
+.search-meta {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  color: var(--text-muted);
+  background: var(--bg-elevated);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
 }
 
 .search-bar {

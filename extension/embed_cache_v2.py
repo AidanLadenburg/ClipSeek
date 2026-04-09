@@ -4,6 +4,7 @@ Avoids unpickling multi‑GB pickle blobs on panel startup.
 """
 from __future__ import annotations
 
+import gc
 import os
 import pickle
 from datetime import datetime
@@ -50,6 +51,37 @@ def chunks_to_numpy_2d(chunks: Any) -> np.ndarray:
     if arr.ndim == 1:
         arr = arr.reshape(1, -1)
     return np.ascontiguousarray(arr)
+
+
+def release_v2_shared_mmap_before_matrix_replace(objects: List[Any]) -> None:
+    """
+    Close the shared mmap backing corpus rows before replacing cached_embeddings.matrix.npy.
+
+    On Windows, os.replace fails with 'Access is denied' if the destination file is still
+    open (e.g. np.load(..., mmap_mode='r')). Call after all chunk data has been copied out.
+    """
+    matrix = None
+    for obj in objects:
+        m = getattr(obj, "_corpus_matrix", None)
+        if m is not None:
+            matrix = m
+            break
+    if matrix is None:
+        return
+    try:
+        mm = getattr(matrix, "_mmap", None)
+        if mm is not None:
+            mm.close()
+        elif isinstance(matrix, np.memmap) and hasattr(matrix, "close"):
+            matrix.close()
+    except OSError:
+        pass
+    for obj in objects:
+        if getattr(obj, "_corpus_matrix", None) is matrix:
+            obj._corpus_matrix = None
+            obj.chunks = None
+    del matrix
+    gc.collect()
 
 
 def _video_mtime_ts(obj: Any) -> float:
@@ -128,6 +160,8 @@ def save_v2_from_objects(objects: List[Any], embeddings_path: str) -> None:
                 os.remove(stale)
         except OSError:
             pass
+
+    release_v2_shared_mmap_before_matrix_replace(objects)
 
     np.save(tmp_m, big)
     os.replace(tmp_m, matrix_path)

@@ -187,6 +187,27 @@ class EmbeddingIndexCache:
         self._last_save_time = 0.0
         self._videos_since_save = 0
 
+    def _replace_index_from_mmap(self) -> None:
+        """Reload in-memory index from mmap files (after a successful write)."""
+        if not v2_bundle_exists(self.embeddings_path):
+            return
+        objs = load_v2_objects(self.embeddings_path)
+        self._by_path = {merge_path_key(getattr(o, "path", "")): o for o in objs}
+
+    def _merge_mmap_reload_with_concurrent_adds(self, saved_keys: frozenset) -> None:
+        """
+        Reload mmap-backed rows from disk after save, but keep paths that were not part
+        of that save snapshot (e.g. a video finished while the mmap file was being written).
+        """
+        if not v2_bundle_exists(self.embeddings_path):
+            return
+        objs = load_v2_objects(self.embeddings_path)
+        fresh = {merge_path_key(getattr(o, "path", "")): o for o in objs}
+        for k, o in self._by_path.items():
+            if k not in saved_keys:
+                fresh[k] = o
+        self._by_path = fresh
+
     def _rebuild_index_from_disk(self) -> None:
         n_disk = _count_per_video_pkls(self.embeddings_path)
         if n_disk == 0:
@@ -202,6 +223,10 @@ class EmbeddingIndexCache:
             try:
                 atomic_write_cache(self.embeddings_path, merged)
                 logging.info("Wrote mmap cache (%d videos).", len(merged))
+                try:
+                    self._replace_index_from_mmap()
+                except Exception as e:
+                    logging.warning("Could not mmap-reload after rebuild save: %s", e)
             except Exception as e:
                 logging.error("Could not write mmap cache: %s", e)
         self._last_save_time = time.monotonic()
@@ -258,11 +283,19 @@ class EmbeddingIndexCache:
             if not should:
                 return False
             merged = list(self._by_path.values())
+            saved_keys = frozenset(
+                merge_path_key(getattr(o, "path", "")) for o in merged
+            )
             self._videos_since_save = 0
             self._last_save_time = time.monotonic()
 
         try:
             atomic_write_cache(self.embeddings_path, merged)
+            with self._lock:
+                try:
+                    self._merge_mmap_reload_with_concurrent_adds(saved_keys)
+                except Exception as e:
+                    logging.warning("Could not refresh mmap index after periodic save: %s", e)
             logging.info(
                 "Updated mmap cache (%d videos, periodic/forced=%s).",
                 len(merged),

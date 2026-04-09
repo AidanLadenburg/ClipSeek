@@ -33,14 +33,28 @@ try:
     import faiss  # type: ignore
 
     _FAISS_AVAILABLE = True
-except ImportError:
+    _FAISS_IMPORT_ERROR = None
+except ImportError as _faiss_err:
     faiss = None  # type: ignore
     _FAISS_AVAILABLE = False
+    _FAISS_IMPORT_ERROR = str(_faiss_err)
+    sys.stderr.write(
+        "ClipSeek: faiss import failed; approximate (FAISS) text search is disabled. "
+        "Install with: pip install faiss-cpu\n"
+        f"  ({_FAISS_IMPORT_ERROR})\n"
+    )
 
 # FAISS: probe many chunks, then exact GPU rerank on top candidate videos only.
 FAISS_PROBE_K_MULT = 200
 FAISS_MAX_RERANK_VIDEOS = 3500
 FAISS_ADD_BATCH = 50000
+
+
+def _clipseek_ui(phase: str, message: str, **extra) -> None:
+    """Single-line JSON for the CEP panel (Premiere alerts + UI); not mixed with search JSON."""
+    payload = {"phase": phase, "message": message, **extra}
+    sys.stdout.write("CLIPSEEK_UI " + json.dumps(payload, ensure_ascii=True) + "\n")
+    sys.stdout.flush()
 
 
 def fix_path(path):
@@ -153,7 +167,20 @@ class PersistentSearch:
     def __init__(self, video_folder=None, embedding_folder=None):
         print("Startup...", flush=True)
         self.embedder = CosmosEmbedder()
+        _clipseek_ui(
+            "model_loading",
+            "ClipSeek: Loading Cosmos embedding model…",
+        )
         self.embedder.load()
+        _clipseek_ui(
+            "model_ready",
+            "ClipSeek: Embedding model loaded.",
+        )
+        if not _FAISS_AVAILABLE:
+            _clipseek_ui(
+                "faiss_unavailable",
+                "ClipSeek: FAISS not installed — FAISS mode falls back to exact search. pip install faiss-cpu",
+            )
         self.device = torch.device(self.embedder.device)
         self.cached_objects = None
         self.current_embedding_folder = embedding_folder
@@ -164,14 +191,56 @@ class PersistentSearch:
         if embedding_folder:
             print("loading startup embedding folder", flush=True)
             self.cached_objects = self.load_objs(video_folder, embedding_folder)
+        else:
+            _clipseek_ui(
+                "embeddings_pending",
+                "ClipSeek: No embedding folder at startup — choose one in Settings when ready.",
+            )
+        self._emit_search_ready_and_ready_line()
+
+    def _emit_search_ready_and_ready_line(self) -> None:
+        n = len(self.cached_objects) if self.cached_objects else 0
+        if n:
+            msg = f"ClipSeek: Cache loaded — ready to search ({n} videos)."
+        else:
+            msg = (
+                "ClipSeek: Ready — select an embedding folder in Settings to load your library."
+            )
+        _clipseek_ui("search_ready", msg, videos=n)
         print("READY", flush=True)
 
     def update_embedding_folder(self, video_folder, new_folder):
+        # Bridge re-sends the same folder right after boot; avoid duplicate reload/alerts.
+        if (
+            new_folder
+            and new_folder == self.current_embedding_folder
+            and self.cached_objects is not None
+        ):
+            return
         self._clear_faiss_cache()
         self.current_embedding_folder = new_folder
         self.current_video_folder = video_folder
+        if not new_folder:
+            self.cached_objects = []
+            _clipseek_ui(
+                "embeddings_cleared",
+                "ClipSeek: Embedding folder cleared.",
+                videos=0,
+            )
+            return
+        _clipseek_ui(
+            "cache_loading",
+            "ClipSeek: Loading embedding cache…",
+        )
         self.cached_objects = self.load_objs(video_folder, new_folder)
-        print("Embedding folder updated and embeddings reloaded.", flush=True)
+        n = len(self.cached_objects) if self.cached_objects else 0
+        _clipseek_ui(
+            "embeddings_reloaded",
+            f"ClipSeek: Embeddings loaded — ready to search ({n} videos)."
+            if n
+            else "ClipSeek: Embedding folder has no indexed videos yet.",
+            videos=n,
+        )
 
     def _clear_faiss_cache(self):
         self._faiss_index = None
@@ -210,50 +279,112 @@ class PersistentSearch:
         embedding_folder,
         annotation_folder,
         search_mode: str = "exact",
+        is_mean=True,
     ):
         try:
-            _ = search_mode  # image/video file search uses batched exact similarity only
+            t_wall = time.time()
+            if isinstance(is_mean, str):
+                is_mean = is_mean.lower() in ("true", "1", "yes")
+            if search_mode not in ("exact", "faiss"):
+                search_mode = "exact"
+            faiss_requested = search_mode == "faiss"
+
+            t_load0 = time.time()
             vid_objs = self.load_objs(video_folder, embedding_folder)
+            load_seconds = time.time() - t_load0
+
+            if not vid_objs:
+                return {
+                    "results": [],
+                    "search_seconds": time.time() - t_wall,
+                    "load_seconds": load_seconds,
+                    "retrieve_seconds": 0.0,
+                    "faiss_used": False,
+                    "faiss_requested": faiss_requested,
+                    "faiss_available": _FAISS_AVAILABLE,
+                }
 
             if query_type == "image":
                 q = self.embedder.get_image_feat(file_path).to(self.device)
             elif query_type == "video":
                 q = self.embedder.get_vid_feat_tensor(fix_path(file_path)).to(self.device)
             else:
-                return {"error": "Unsupported query type"}
+                return {"error": "Unsupported query type", "results": []}
 
+            emb_path = embedding_folder or self.current_embedding_folder or ""
             matrix_shared = _vid_objs_shared_corpus_matrix(vid_objs)
-            with torch.no_grad():
-                if matrix_shared is not None:
-                    g_idx, split_sizes = _gather_chunk_indices_and_split_sizes(vid_objs)
-                    sims_1d = self._chunkwise_cosine_max_chunk_sims(q, matrix_shared, g_idx)
-                else:
-                    all_chunks = [
-                        chunks_to_tensor(vid_obj.chunks, self.device) for vid_obj in vid_objs
-                    ]
-                    stacked_chunks = torch.cat(all_chunks, dim=0)
-                    sims_1d = cosine_query_to_chunks(q, stacked_chunks)
-                    split_sizes = [t.shape[0] for t in all_chunks]
+            faiss_used = False
+            t_sim0 = time.time()
+            final_sims = None
 
-                sims_split_list = torch.split(sims_1d, split_sizes, dim=0)
-            final_sims = torch.stack([torch.mean(sim) for sim in sims_split_list])
+            if (
+                faiss_requested
+                and matrix_shared is not None
+                and emb_path
+                and _FAISS_AVAILABLE
+                and all(hasattr(o, "_corpus_video_index") for o in vid_objs)
+            ):
+                fr = self._try_faiss_rerank_videos(
+                    q,
+                    vid_objs,
+                    matrix_shared,
+                    is_mean,
+                    False,
+                    True,
+                    emb_path,
+                )
+                if fr is not None:
+                    final_sims = fr
+                    faiss_used = True
+
+            if final_sims is None:
+                with torch.no_grad():
+                    if matrix_shared is not None:
+                        g_idx, split_sizes = _gather_chunk_indices_and_split_sizes(vid_objs)
+                        sims_1d = self._chunkwise_cosine_max_chunk_sims(q, matrix_shared, g_idx)
+                    else:
+                        all_chunks = [
+                            chunks_to_tensor(vid_obj.chunks, self.device) for vid_obj in vid_objs
+                        ]
+                        stacked_chunks = torch.cat(all_chunks, dim=0)
+                        sims_1d = cosine_query_to_chunks(q, stacked_chunks)
+                        split_sizes = [t.shape[0] for t in all_chunks]
+
+                    sims_split_list = torch.split(sims_1d, split_sizes, dim=0)
+                for i, vo in enumerate(vid_objs):
+                    vo.sims = sims_split_list[i]
+                final_sims = torch.stack(
+                    [
+                        torch.mean(sim) if is_mean else torch.max(sim)
+                        for sim in sims_split_list
+                    ]
+                )
+
+            retrieve_seconds = time.time() - t_sim0
 
             top_values, top_indices = torch.topk(
                 final_sims, k=min(len(vid_objs), 500), largest=True, sorted=True
             )
-            top_vids = [vid_objs[i] for i in top_indices]
-
             out = []
-            for orig_idx, i in zip(top_indices.tolist(), top_vids):
-                si = sims_split_list[orig_idx]
-                t_sec = torch.argmax(si).item() * chunk_stride_sec(i)
-                out.append((i.path, t_sec))
+            for idx in top_indices.tolist():
+                vid = vid_objs[idx]
+                si = vid.sims
+                t_sec = torch.argmax(si).item() * chunk_stride_sec(vid)
+                out.append([vid.path, t_sec])
 
-            return out
+            return {
+                "results": out,
+                "search_seconds": time.time() - t_wall,
+                "load_seconds": load_seconds,
+                "retrieve_seconds": retrieve_seconds,
+                "faiss_used": faiss_used,
+                "faiss_requested": faiss_requested,
+                "faiss_available": _FAISS_AVAILABLE,
+            }
 
         except Exception as e:
             print(f"error with image search {e}", flush=True)
-            return []
+            return {"error": str(e), "results": []}
 
     def filter_metadata(self, vid_objs, date_from=None, date_to=None, embeddings_folder=None):
         if not vid_objs:
@@ -325,10 +456,15 @@ class PersistentSearch:
 
         if v2_bundle_exists(embeddings_path) and v2_is_current(embeddings_path, pkl_mtime):
             try:
+                _clipseek_ui(
+                    "cache_loading",
+                    "ClipSeek: Loading mmap embedding cache (cached_embeddings.matrix.npy)…",
+                )
                 t0 = time.time()
                 cached_objects = load_v2_objects(embeddings_path)
+                dt = time.time() - t0
                 print(
-                    f"Using mmap cache ({len(cached_objects)} videos) in {time.time() - t0:.2f}s.",
+                    f"Using mmap cache ({len(cached_objects)} videos) in {dt:.2f}s.",
                     flush=True,
                 )
                 self.cached_objects = cached_objects
@@ -337,6 +473,10 @@ class PersistentSearch:
                 return cached_objects
             except Exception as e:
                 print(f"Mmap cache invalid ({e}); rebuilding from per-video .pkls.", flush=True)
+                _clipseek_ui(
+                    "cache_rebuild",
+                    "ClipSeek: Mmap cache unavailable; loading per-video .pkl files instead…",
+                )
 
         disk_pkls = []
         try:
@@ -345,10 +485,29 @@ class PersistentSearch:
                     disk_pkls.append(f.path)
         except OSError as e:
             print(f"Cannot read embedding folder: {e}", flush=True)
+            _clipseek_ui(
+                "cache_error",
+                f"ClipSeek: Cannot read embedding folder: {e}",
+            )
             self.cached_objects = []
             return []
 
-        print(f"Loading {len(disk_pkls)} embedding file(s) from disk.", flush=True)
+        n_pkls = len(disk_pkls)
+        if n_pkls == 0:
+            _clipseek_ui(
+                "cache_empty",
+                "ClipSeek: No per-video .pkl files in this folder.",
+                videos=0,
+            )
+            self.cached_objects = []
+            return []
+
+        _clipseek_ui(
+            "cache_loading",
+            f"ClipSeek: Loading {n_pkls} per-video embedding file(s) — building cache may take a while…",
+            total=n_pkls,
+        )
+        print(f"Loading {n_pkls} embedding file(s) from disk.", flush=True)
 
         def load_one(p):
             try:
@@ -366,12 +525,23 @@ class PersistentSearch:
                 return None
 
         all_objects = []
+        report_step = max(500, n_pkls // 25)
+        last_reported = 0
         for i in range(0, len(disk_pkls), chunk_size):
             chunk = disk_pkls[i : i + chunk_size]
             with ThreadPoolExecutor(max_workers=8) as executor:
                 loaded = list(filter(None, executor.map(load_one, chunk)))
             all_objects.extend(loaded)
             gc.collect()
+            processed = min(i + len(chunk), n_pkls)
+            if processed == n_pkls or processed - last_reported >= report_step:
+                _clipseek_ui(
+                    "cache_progress",
+                    f"ClipSeek: Loading embeddings {processed} / {n_pkls}…",
+                    loaded=processed,
+                    total=n_pkls,
+                )
+                last_reported = processed
 
         by_path = {}
         for obj in all_objects:
@@ -384,6 +554,10 @@ class PersistentSearch:
             print("Saved mmap embedding cache (cached_embeddings.matrix.npy + .meta).", flush=True)
         except Exception as e:
             print(f"Error saving mmap cache: {e}", flush=True)
+            _clipseek_ui(
+                "cache_save_error",
+                f"ClipSeek: Could not save mmap cache: {e}",
+            )
 
         self.cached_objects = merged
         self.current_video_folder = video_folder
@@ -551,7 +725,12 @@ class PersistentSearch:
                 query_feat = self.embedder.get_vid_feat_tensor(query_path).to(self.device)
 
         if not vid_objs:
-            return torch.tensor([], device=self.device)
+            return torch.tensor([], device=self.device), {
+                "faiss_used": False,
+                "faiss_requested": search_mode == "faiss",
+                "faiss_available": _FAISS_AVAILABLE,
+                "retrieve_seconds": 0.0,
+            }
 
         start = time.time()
 
@@ -581,8 +760,14 @@ class PersistentSearch:
                 emb_path,
             )
             if fr is not None:
-                print("Search (cos sim) in: ", time.time() - start, flush=True)
-                return fr
+                elapsed = time.time() - start
+                print("Search (cos sim) in: ", elapsed, flush=True)
+                return fr, {
+                    "faiss_used": True,
+                    "faiss_requested": True,
+                    "faiss_available": True,
+                    "retrieve_seconds": elapsed,
+                }
 
         sims_split = None
         anno_sims_split = None
@@ -646,8 +831,14 @@ class PersistentSearch:
             for i in range(len(vid_objs)):
                 vid_objs[i].sims = anno_sims_split[i]
 
-        print("Search (cos sim) in: ", time.time() - start, flush=True)
-        return sims_tensor
+        elapsed = time.time() - start
+        print("Search (cos sim) in: ", elapsed, flush=True)
+        return sims_tensor, {
+            "faiss_used": False,
+            "faiss_requested": search_mode == "faiss",
+            "faiss_available": _FAISS_AVAILABLE,
+            "retrieve_seconds": elapsed,
+        }
 
     def search_videos(
         self,
@@ -662,16 +853,28 @@ class PersistentSearch:
         search_mode: str = "exact",
     ):
         try:
-            start = time.time()
+            t_wall = time.time()
+            t_load = time.time()
             vid_objs = self.load_objs(video_folder, embedding_folder)
-            print("Objs loaded in: ", time.time() - start, flush=True)
+            load_seconds = time.time() - t_load
+            print("Objs loaded in: ", load_seconds, flush=True)
             if date_from or date_to:
                 vid_objs = self.filter_metadata(vid_objs, date_from, date_to, embedding_folder)
             if isinstance(isMean, str):
                 isMean = isMean.lower() in ("true", "1", "yes")
             if search_mode not in ("exact", "faiss"):
                 search_mode = "exact"
-            sims_tensor = self.retrieve_vids(
+            if not vid_objs:
+                return {
+                    "results": [],
+                    "load_seconds": load_seconds,
+                    "retrieve_seconds": 0.0,
+                    "search_seconds": time.time() - t_wall,
+                    "faiss_used": False,
+                    "faiss_requested": search_mode == "faiss",
+                    "faiss_available": _FAISS_AVAILABLE,
+                }
+            sims_tensor, retrieve_meta = self.retrieve_vids(
                 query,
                 annotation_folder,
                 vid_objs,
@@ -679,17 +882,39 @@ class PersistentSearch:
                 query_type,
                 search_mode,
             )
+            if sims_tensor.numel() == 0:
+                return {
+                    "results": [],
+                    "load_seconds": load_seconds,
+                    "retrieve_seconds": retrieve_meta["retrieve_seconds"],
+                    "search_seconds": time.time() - t_wall,
+                    "faiss_used": retrieve_meta["faiss_used"],
+                    "faiss_requested": retrieve_meta["faiss_requested"],
+                    "faiss_available": retrieve_meta["faiss_available"],
+                }
             top_values, top_indices = torch.topk(
                 sims_tensor, k=min(len(vid_objs), 500), largest=True, sorted=True
             )
             top_vids = [vid_objs[i] for i in top_indices]
             del vid_objs
 
-            return top_vids
+            times = [
+                [i.path, (torch.argmax(i.sims) * chunk_stride_sec(i)).item()]
+                for i in top_vids
+            ]
+            return {
+                "results": times,
+                "load_seconds": load_seconds,
+                "retrieve_seconds": retrieve_meta["retrieve_seconds"],
+                "search_seconds": time.time() - t_wall,
+                "faiss_used": retrieve_meta["faiss_used"],
+                "faiss_requested": retrieve_meta["faiss_requested"],
+                "faiss_available": retrieve_meta["faiss_available"],
+            }
 
         except Exception as e:
             print(f"Error in search: {e}", flush=True)
-            return []
+            return {"error": str(e), "results": []}
 
     def process_commands(self):
         while True:
@@ -724,13 +949,14 @@ class PersistentSearch:
                             embedding_folder,
                             annotation_folder,
                             command.get("search_mode", "exact"),
+                            command.get("is_mean", True),
                         )
                         print(json.dumps(result), flush=True)
                     else:
                         date_from = command.get("date_from")
                         date_to = command.get("date_to")
                         sm = command.get("search_mode", "exact")
-                        vids = self.search_videos(
+                        out = self.search_videos(
                             command["video_folder"],
                             command["embedding_folder"],
                             command["annotation_folder"],
@@ -741,11 +967,7 @@ class PersistentSearch:
                             date_to,
                             sm,
                         )
-                        times = [
-                            (i.path, (torch.argmax(i.sims) * chunk_stride_sec(i)).item())
-                            for i in vids
-                        ]
-                        print(json.dumps(times), flush=True)
+                        print(json.dumps(out), flush=True)
                 except json.JSONDecodeError:
                     print(json.dumps({"error": "Invalid JSON"}), flush=True)
                 except Exception as e:
