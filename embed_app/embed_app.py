@@ -163,26 +163,41 @@ class VideoEmbedder:
         if self.status_callback:
             self.status_callback(message)
 
+    # CSV columns: [hash, path, status, reason]
+    #   status: "ok" | "failed"  (rows missing status are treated as "ok" for backward compat)
+    #   reason: short error label for failed rows (empty for ok)
+    # The CSV is append-only; on read the LAST row for a given hash wins, so a
+    # later "ok" entry naturally supersedes an earlier "failed" one.
     def load_processed_cache(self, output_dir):
         csv_path = os.path.join(output_dir, 'processed_files.csv')
-        processed = set()
+        processed = {}
         if os.path.exists(csv_path):
             try:
                 with open(csv_path, 'r', encoding='utf-8') as f:
                     reader = csv.reader(f)
                     for row in reader:
-                        if row: processed.add(row[0])
+                        if not row:
+                            continue
+                        file_hash = row[0]
+                        path = row[1] if len(row) > 1 else ""
+                        status = (row[2].strip().lower() if len(row) > 2 and row[2] else "ok") or "ok"
+                        reason = row[3] if len(row) > 3 else ""
+                        processed[file_hash] = {
+                            "path": path,
+                            "status": status,
+                            "reason": reason,
+                        }
             except Exception as e:
                 logging.error(f"Failed to load cache: {e}")
         return processed
 
-    def save_processed_cache(self, output_dir, file_hash, file_path):
+    def save_processed_cache(self, output_dir, file_hash, file_path, status="ok", reason=""):
         csv_path = os.path.join(output_dir, 'processed_files.csv')
         with self.csv_lock:
             try:
                 with open(csv_path, 'a', newline='', encoding='utf-8') as f:
                     writer = csv.writer(f)
-                    writer.writerow([file_hash, file_path])
+                    writer.writerow([file_hash, file_path, status, reason])
             except Exception as e:
                 logging.error(f"Failed to write cache: {e}")
 
@@ -321,7 +336,9 @@ class VideoEmbedder:
             vid_obj.save(output_path)
             
             file_hash = get_file_hash(video_path)
-            self.save_processed_cache(output_dir, file_hash, video_path)
+            self.save_processed_cache(
+                output_dir, file_hash, video_path, status="ok"
+            )
 
             if self._embedding_index_cache is not None:
                 self._embedding_index_cache.record_completed_video(vid_obj)
@@ -333,17 +350,49 @@ class VideoEmbedder:
             logging.info(f"Finished: {filename}")
 
         except Exception as e:
-            err_msg = f"Failed on {filename}: {str(e)}"
+            err_text = str(e)
+            err_msg = f"Failed on {filename}: {err_text}"
             logging.error(err_msg)
-            if "out of memory" in str(e).lower():
+
+            reason = type(e).__name__
+            if "out of memory" in err_text.lower():
                 torch.cuda.empty_cache()
+                reason = "OOM"
+
+            # Record the failure so we can optionally skip it on re-runs
+            # without having to re-attempt embedding every restart.
+            try:
+                file_hash = get_file_hash(video_path)
+                short_reason = reason
+                detail = err_text.replace("\n", " ").replace("\r", " ").strip()
+                if detail:
+                    short_reason = f"{reason}: {detail[:200]}"
+                self.save_processed_cache(
+                    output_dir,
+                    file_hash,
+                    video_path,
+                    status="failed",
+                    reason=short_reason,
+                )
+            except Exception as save_err:
+                logging.error(
+                    f"Could not record failure for {filename}: {save_err}"
+                )
         finally:
             gc.collect()
             with self.progress_lock:
                 if self.total_progress_callback:
                     self.total_progress_callback(1)
 
-    def process_folder(self, input_dir, output_dir, chunk_size, overlap, max_workers=1):
+    def process_folder(
+        self,
+        input_dir,
+        output_dir,
+        chunk_size,
+        overlap,
+        max_workers=1,
+        skip_failed=False,
+    ):
         self.stop_event.clear()
         self.load_model(max_workers=max_workers)
         
@@ -371,30 +420,61 @@ class VideoEmbedder:
         self._embedding_index_cache = EmbeddingIndexCache(output_dir)
         self._embedding_index_cache.initialize()
         
-        processed_hashes = self.load_processed_cache(output_dir)
+        processed_entries = self.load_processed_cache(output_dir)
         pending = []
+        skipped_ok_count = 0
+        skipped_failed_count = 0
+        retry_failed_count = 0
 
         for i, (fname, root) in enumerate(all_files):
             fpath = os.path.join(root, fname)
             fhash = get_file_hash(fpath)
 
-            if fhash in processed_hashes:
-                if self.total_progress_callback:
-                    self.total_progress_callback(1)
-            else:
-                pending.append((i, fname, root, output_dir, chunk_size, overlap))
+            entry = processed_entries.get(fhash)
+            if entry is not None:
+                status = entry.get("status", "ok")
+                if status == "ok":
+                    skipped_ok_count += 1
+                    if self.total_progress_callback:
+                        self.total_progress_callback(1)
+                    continue
+                if status == "failed" and skip_failed:
+                    skipped_failed_count += 1
+                    if self.total_progress_callback:
+                        self.total_progress_callback(1)
+                    continue
+                # status == "failed" and not skip_failed -> retry below
+                if status == "failed":
+                    retry_failed_count += 1
+
+            pending.append((i, fname, root, output_dir, chunk_size, overlap))
 
         n_rep = len(self._models) if self._models else 1
         tasks = []
         for j, tup in enumerate(pending):
             tasks.append(tup + (j % n_rep,))
 
-        skipped_count = total_files - len(tasks)
-        if skipped_count > 0:
-            logging.info(f"Skipped {skipped_count} already processed files.")
+        skipped_count = skipped_ok_count + skipped_failed_count
+        if skipped_ok_count > 0:
+            logging.info(f"Skipped {skipped_ok_count} already-processed files.")
+        if skipped_failed_count > 0:
+            logging.info(
+                f"Skipped {skipped_failed_count} previously-failed files (skip_failed=True)."
+            )
+        if retry_failed_count > 0:
+            logging.info(
+                f"Retrying {retry_failed_count} previously-failed files (skip_failed=False)."
+            )
 
-        logging.info(f"Starting processing {len(tasks)} files with {max_workers} workers.")
-        self.update_status(f"Queued {len(tasks)} files (Skipped {skipped_count}). Starting...")
+        logging.info(
+            f"Starting processing {len(tasks)} files with {max_workers} workers."
+        )
+        status_msg = (
+            f"Queued {len(tasks)} files (Skipped {skipped_count}"
+            + (f"; {skipped_failed_count} prev-failed" if skipped_failed_count else "")
+            + "). Starting..."
+        )
+        self.update_status(status_msg)
         
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -464,6 +544,17 @@ class App:
         self.worker_entry = tk.Entry(settings_frame, width=5)
         self.worker_entry.insert(0, "2") 
         self.worker_entry.grid(row=0, column=5, padx=5)
+
+        # Skip previously failed files
+        self.skip_failed_var = tk.BooleanVar(value=False)
+        self.skip_failed_chk = tk.Checkbutton(
+            settings_frame,
+            text="Skip previously failed files",
+            variable=self.skip_failed_var,
+        )
+        self.skip_failed_chk.grid(
+            row=1, column=0, columnspan=6, padx=5, pady=(6, 0), sticky="w"
+        )
 
         # Control Buttons
         btn_frame = tk.Frame(root)
@@ -547,7 +638,9 @@ class App:
                 
                 self.worker_entry.delete(0, tk.END)
                 self.worker_entry.insert(0, str(config.get("workers", "2")))
-                
+
+                self.skip_failed_var.set(bool(config.get("skip_failed", False)))
+
             except Exception as e:
                 print(f"Failed to load config: {e}")
 
@@ -561,7 +654,8 @@ class App:
             "output_dir": self.output_entry.get(),
             "chunk_size": self.chunk_entry.get(),
             "overlap": self.overlap_entry.get(),
-            "workers": self.worker_entry.get()
+            "workers": self.worker_entry.get(),
+            "skip_failed": bool(self.skip_failed_var.get()),
         }
         try:
             with open(self.config_file, 'w') as f:
@@ -759,11 +853,25 @@ class App:
         self.stop_btn.config(state=tk.NORMAL)
         self.regenerate_cache_btn.config(state=tk.DISABLED)
         
-        t = threading.Thread(target=self.run_process, args=(input_dir, output_dir, chunk_size, overlap, workers))
+        skip_failed = bool(self.skip_failed_var.get())
+
+        t = threading.Thread(
+            target=self.run_process,
+            args=(input_dir, output_dir, chunk_size, overlap, workers, skip_failed),
+        )
         t.start()
 
-    def run_process(self, input_dir, output_dir, chunk_size, overlap, workers):
-        self.embedder.process_folder(input_dir, output_dir, chunk_size, overlap, max_workers=workers)
+    def run_process(
+        self, input_dir, output_dir, chunk_size, overlap, workers, skip_failed=False
+    ):
+        self.embedder.process_folder(
+            input_dir,
+            output_dir,
+            chunk_size,
+            overlap,
+            max_workers=workers,
+            skip_failed=skip_failed,
+        )
         
         self.root.after(0, lambda: self.start_btn.config(state=tk.NORMAL))
         self.root.after(0, lambda: self.stop_btn.config(state=tk.DISABLED))

@@ -16,12 +16,10 @@ import torch
 
 from clipseek_video import load_clipseek_video_pickle
 from embed_cache_v2 import (
+    _bundle_mtime,
     load_v2_objects,
-    max_per_video_embedding_mtime,
-    read_manifest_video_count,
     save_v2_from_objects,
     v2_bundle_exists,
-    v2_is_current,
 )
 
 # Old monolithic cache filename — excluded from per-video scans; removed on explicit regenerate.
@@ -233,36 +231,85 @@ class EmbeddingIndexCache:
         self._videos_since_save = 0
 
     def initialize(self) -> None:
-        """Load mmap cache or rebuild from per-video .pkls."""
-        n_disk = _count_per_video_pkls(self.embeddings_path)
-        mt = max_per_video_embedding_mtime(self.embeddings_path)
+        """
+        Load mmap cache when available and only fall back to a full rebuild
+        when the bundle is missing or unreadable.
 
-        if v2_bundle_exists(self.embeddings_path) and v2_is_current(self.embeddings_path, mt):
-            n_meta = read_manifest_video_count(self.embeddings_path)
-            if n_meta is not None and n_meta == n_disk:
-                try:
-                    objs = load_v2_objects(self.embeddings_path)
-                    self._by_path = {merge_path_key(getattr(o, "path", "")): o for o in objs}
-                    logging.info("Using mmap cache (%d videos).", len(self._by_path))
-                    self._last_save_time = time.monotonic()
-                    self._videos_since_save = 0
-                    return
-                except Exception as e:
-                    logging.warning("Mmap cache unreadable (%s); rebuilding from per-video .pkls.", e)
-                    self._rebuild_index_from_disk()
-                    return
-            if n_meta is None:
-                logging.info("Could not read mmap manifest; rebuilding from disk.")
-            else:
+        Strategy:
+          1. If the v2 bundle exists, mmap-load it as the base index.
+          2. Incrementally load any per-video ``.pkl`` files whose mtime is
+             newer than the bundle and merge them in (covers partial runs).
+          3. A full rebuild only happens when no usable bundle exists.
+
+        This avoids the full-rebuild-every-run problem when the disk file
+        count doesn't match the manifest (e.g. when ``merge_path_key``
+        collapses multiple ``.pkl`` paths into one bundle entry).
+        """
+        n_disk = _count_per_video_pkls(self.embeddings_path)
+
+        if v2_bundle_exists(self.embeddings_path):
+            try:
+                objs = load_v2_objects(self.embeddings_path)
+                self._by_path = {
+                    merge_path_key(getattr(o, "path", "")): o for o in objs
+                }
+                bundle_ts = _bundle_mtime(self.embeddings_path)
                 logging.info(
-                    "Mmap manifest count (%d) != per-video pkls (%d); rebuilding from disk.",
-                    n_meta,
+                    "Using mmap cache (%d entries; %d per-video .pkl files on disk).",
+                    len(self._by_path),
                     n_disk,
                 )
-            self._rebuild_index_from_disk()
-            return
+
+                added = self._merge_newer_pkls_into_index(bundle_ts)
+                if added:
+                    logging.info(
+                        "Merged %d per-video .pkl(s) newer than the bundle.",
+                        added,
+                    )
+
+                self._last_save_time = time.monotonic()
+                # Anything newer than the bundle counts as unsaved work so
+                # the next periodic/final save persists those merged rows.
+                self._videos_since_save = added
+                return
+            except Exception as e:
+                logging.warning(
+                    "Mmap cache unreadable (%s); rebuilding from per-video .pkls.",
+                    e,
+                )
 
         self._rebuild_index_from_disk()
+
+    def _merge_newer_pkls_into_index(self, bundle_ts: float) -> int:
+        """
+        Load any per-video ``.pkl`` files modified after ``bundle_ts`` and
+        merge them into ``self._by_path``. Returns the number merged.
+        """
+        if bundle_ts <= 0:
+            return 0
+        newer: List[str] = []
+        try:
+            for f in os.scandir(self.embeddings_path):
+                if not f.name.endswith(".pkl") or f.name == LEGACY_MONOLITHIC_PKL:
+                    continue
+                try:
+                    if f.stat().st_mtime > bundle_ts:
+                        newer.append(f.path)
+                except OSError:
+                    continue
+        except OSError as e:
+            logging.warning("Could not scan embedding folder for newer .pkls: %s", e)
+            return 0
+
+        if not newer:
+            return 0
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            loaded = list(filter(None, executor.map(_load_one_pkl, newer)))
+
+        for o in loaded:
+            self._by_path[merge_path_key(getattr(o, "path", ""))] = o
+        return len(loaded)
 
     def record_completed_video(self, vid_obj: Any) -> None:
         with self._lock:
