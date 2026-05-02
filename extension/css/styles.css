@@ -111,6 +111,112 @@ body {
   border: 1px solid var(--border);
 }
 
+.search-status {
+  margin: 0 0 10px;
+  padding: 8px 12px;
+  font-size: 0.82rem;
+  line-height: 1.35;
+  color: var(--text);
+  background: var(--bg-elevated);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.search-status::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 0 rgba(77, 171, 247, 0.55);
+  animation: pulseDot 1.4s ease-out infinite;
+  flex-shrink: 0;
+}
+
+.search-status.is-error {
+  color: #fecaca;
+  background: #2d1518;
+  border-color: #991b1b;
+}
+
+.search-status.is-error::before {
+  background: #f87171;
+  animation: none;
+  box-shadow: none;
+}
+
+.search-status.is-done {
+  color: var(--text-muted);
+}
+
+.search-status.is-done::before {
+  background: var(--success);
+  animation: none;
+  box-shadow: 0 0 8px rgba(81, 207, 102, 0.55);
+}
+
+@keyframes pulseDot {
+  0% { box-shadow: 0 0 0 0 rgba(77, 171, 247, 0.55); }
+  70% { box-shadow: 0 0 0 8px rgba(77, 171, 247, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(77, 171, 247, 0); }
+}
+
+.search-options {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.search-options__label {
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.segmented {
+  display: inline-flex;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px;
+  gap: 2px;
+}
+
+.segmented__btn {
+  padding: 4px 14px;
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  min-width: 52px;
+}
+
+.segmented__btn:hover:not(.is-active) {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+.segmented__btn.is-active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.segmented__btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .search-bar {
   margin-bottom: 12px;
 }

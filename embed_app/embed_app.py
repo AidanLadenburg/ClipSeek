@@ -53,6 +53,7 @@ def get_file_hash(path):
 
 # Keep flat output folder but avoid basename collisions across subfolders.
 _EMBED_FILENAME_MAX_STEM = 100
+DEFAULT_CHUNK_BATCH_SIZE = 4
 
 def embedding_pkl_filename(video_path):
     """
@@ -217,7 +218,15 @@ class VideoEmbedder:
         except Exception as e:
             logging.error(f"Failed to read video {video_path}: {e}")
             raise e
-        
+
+        if not self._models:
+            raise RuntimeError("Model not loaded; call load_model() first.")
+
+        gi = gpu_index % len(self._models)
+        model = self._models[gi]
+        lock = self._gpu_locks[gi]
+        dev = f"cuda:{gi}" if torch.cuda.is_available() else "cpu"
+        chunk_batch_size = self._chunk_batch_size()
         embeddings = []
         
         stride = chunk_size - overlap
@@ -231,6 +240,59 @@ class VideoEmbedder:
             
         num_chunks = len(start_times)
         
+        pending_frames = []
+        pending_indices = []
+
+        def embed_frame_batch(frames_batch, chunk_indices):
+            if not frames_batch:
+                return
+            batch = video_inputs = video_out = chunk_embs = None
+            try:
+                batch = np.transpose(np.stack(frames_batch, axis=0), (0, 1, 4, 2, 3))
+                video_inputs = self.processor(videos=batch)
+
+                with lock:
+                    if torch.cuda.is_available():
+                        with torch.cuda.device(gi):
+                            video_inputs = {k: v.to(dev) for k, v in video_inputs.items()}
+                            with torch.amp.autocast(
+                                device_type="cuda", dtype=self.dtype
+                            ):
+                                with torch.inference_mode():
+                                    video_out = model.get_video_embeddings(
+                                        **video_inputs
+                                    )
+                    else:
+                        video_inputs = {k: v.to(dev) for k, v in video_inputs.items()}
+                        with torch.inference_mode():
+                            video_out = model.get_video_embeddings(**video_inputs)
+
+                chunk_embs = video_out.visual_proj.float().cpu().numpy()
+                if chunk_embs.ndim == 1:
+                    chunk_embs = chunk_embs.reshape(1, -1)
+                embeddings.extend(
+                    chunk_embs[j : j + 1].copy() for j in range(chunk_embs.shape[0])
+                )
+                del video_inputs, video_out, batch, chunk_embs
+            except Exception as e:
+                del video_inputs, video_out, batch, chunk_embs
+                if len(frames_batch) > 1:
+                    if "out of memory" in str(e).lower() and torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    mid = len(frames_batch) // 2
+                    embed_frame_batch(frames_batch[:mid], chunk_indices[:mid])
+                    embed_frame_batch(frames_batch[mid:], chunk_indices[mid:])
+                else:
+                    logging.error(
+                        f"Error chunk {chunk_indices[0]} in {os.path.basename(video_path)}: {e}"
+                    )
+
+        def flush_pending():
+            nonlocal pending_frames, pending_indices
+            embed_frame_batch(pending_frames, pending_indices)
+            pending_frames = []
+            pending_indices = []
+
         for i, start_time in enumerate(start_times):
             if self.stop_event.is_set():
                 return None
@@ -247,51 +309,21 @@ class VideoEmbedder:
             chunk_len = end_frame - start_frame
             if chunk_len < 1: continue
 
-            actual_frames = min(8, chunk_len)
-            frame_ids = np.linspace(start_frame, min(end_frame, total_frames-1), actual_frames, dtype=int).tolist()
+            last_frame = max(start_frame, min(end_frame - 1, total_frames - 1))
+            frame_ids = np.linspace(start_frame, last_frame, 8, dtype=int).tolist()
 
             try:
                 frames = vr.get_batch(frame_ids).asnumpy()
                 if frames.shape[0] == 0: continue
-
-                batch = np.transpose(np.expand_dims(frames, 0), (0, 1, 4, 2, 3))
-
-                if not self._models:
-                    raise RuntimeError("Model not loaded; call load_model() first.")
-
-                gi = gpu_index % len(self._models)
-                model = self._models[gi]
-                lock = self._gpu_locks[gi]
-
-                video_inputs = self.processor(videos=batch)
-                if torch.cuda.is_available():
-                    dev = f"cuda:{gi}"
-                    video_inputs = {k: v.to(dev) for k, v in video_inputs.items()}
-                else:
-                    video_inputs = {k: v.to("cpu") for k, v in video_inputs.items()}
-
-                with lock:
-                    if torch.cuda.is_available():
-                        with torch.cuda.device(gi):
-                            with torch.amp.autocast(
-                                device_type="cuda", dtype=self.dtype
-                            ):
-                                with torch.no_grad():
-                                    video_out = model.get_video_embeddings(
-                                        **video_inputs
-                                    )
-                    else:
-                        with torch.no_grad():
-                            video_out = model.get_video_embeddings(**video_inputs)
-                    chunk_emb = video_out.visual_proj.float().cpu().numpy()
-
-                embeddings.append(chunk_emb)
-
-                del video_inputs, video_out, batch, frames
-
+                pending_frames.append(frames)
+                pending_indices.append(i)
+                if len(pending_frames) >= chunk_batch_size:
+                    flush_pending()
             except Exception as e:
                 logging.error(f"Error chunk {i} in {os.path.basename(video_path)}: {e}")
                 continue
+
+        flush_pending()
 
         if progress_callback:
             progress_callback(num_chunks, num_chunks)
@@ -299,6 +331,13 @@ class VideoEmbedder:
         del vr
         gc.collect()
         return embeddings
+
+    def _chunk_batch_size(self):
+        raw = os.environ.get("CLIPSEEK_CHUNK_BATCH_SIZE", str(DEFAULT_CHUNK_BATCH_SIZE))
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            return DEFAULT_CHUNK_BATCH_SIZE
 
     def process_single_video(self, file_info):
         if self.stop_event.is_set():
@@ -330,6 +369,8 @@ class VideoEmbedder:
             if self.stop_event.is_set():
                 logging.info(f"Aborted save for {filename}")
                 return
+            if not vid_obj.chunks:
+                raise RuntimeError("No embeddings produced for this video.")
 
             pkl_name = embedding_pkl_filename(video_path)
             output_path = os.path.join(output_dir, pkl_name)
@@ -395,6 +436,7 @@ class VideoEmbedder:
     ):
         self.stop_event.clear()
         self.load_model(max_workers=max_workers)
+        logging.info("Chunk batch size: %d", self._chunk_batch_size())
         
         valid_extensions = ('.mp4', '.avi', '.mov', '.mkv', '.webm')
         all_files = []
@@ -449,6 +491,11 @@ class VideoEmbedder:
 
             pending.append((i, fname, root, output_dir, chunk_size, overlap))
 
+        pending.sort(
+            key=lambda item: self._safe_file_size(os.path.join(item[2], item[1])),
+            reverse=True,
+        )
+
         n_rep = len(self._models) if self._models else 1
         tasks = []
         for j, tup in enumerate(pending):
@@ -491,6 +538,13 @@ class VideoEmbedder:
         else:
             self.update_status("Done! Processing complete.")
             logging.info("Batch processing complete.")
+
+    @staticmethod
+    def _safe_file_size(path):
+        try:
+            return os.path.getsize(path)
+        except OSError:
+            return 0
 
 # --- GUI Logic ---
 class App:

@@ -25,9 +25,10 @@ from embed_cache_v2 import (
 # Old monolithic cache filename — excluded from per-video scans; removed on explicit regenerate.
 LEGACY_MONOLITHIC_PKL = "cached_embeddings.pkl"
 
-# Tune: balance freshness vs I/O when embedding huge libraries.
-CACHE_SAVE_EVERY_N_VIDEOS = 50
-CACHE_SAVE_MIN_INTERVAL_SEC = 45.0
+# Tune: balance freshness vs I/O when embedding huge libraries. Each save rewrites
+# the full mmap matrix, so frequent saves can dominate embedding time.
+CACHE_SAVE_EVERY_N_VIDEOS = 250
+CACHE_SAVE_MIN_INTERVAL_SEC = 180.0
 
 
 # Match extension/io.py — used as dict keys when merging.
@@ -354,4 +355,8 @@ class EmbeddingIndexCache:
             return False
 
     def final_save(self) -> None:
+        with self._lock:
+            if self._videos_since_save <= 0:
+                logging.info("Mmap cache already current; skipping final save.")
+                return
         self.maybe_periodic_save(1, 0.0, force=True)

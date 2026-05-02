@@ -62,6 +62,17 @@ function parseClipseekUiLine(line, onClipseekUiEvent, getDebugMode, sdkLog) {
     if (onClipseekUiEvent && payload && typeof payload.message === 'string') {
       onClipseekUiEvent(payload);
     }
+    // Always surface python tracebacks to Premiere Events when debug mode is on so the
+    // user can copy the full failure context without having to relaunch the panel.
+    if (
+      payload &&
+      payload.traceback &&
+      getDebugMode &&
+      getDebugMode() &&
+      sdkLog
+    ) {
+      sdkLog('ClipSeek (debug):\n' + payload.traceback);
+    }
   } catch (e) {
     if (getDebugMode && sdkLog) sdkLog('ClipSeek: bad UI line: ' + trimmed);
   }
@@ -84,18 +95,28 @@ function createSearchBridge({
       const lines = stdoutBuffer.split('\n');
       stdoutBuffer = lines.pop() || '';
       for (const line of lines) {
-        if (!line.trim()) continue;
-        if (line.trim().startsWith(CLIPSEEK_UI_PREFIX)) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        if (trimmed.startsWith(CLIPSEEK_UI_PREFIX)) {
           parseClipseekUiLine(line, onClipseekUiEvent, getDebugMode, sdkLog);
           continue;
         }
         try {
           const result = JSON.parse(line);
-          if (result.error) sdkLog('Python: ' + result.error);
+          if (result.error) {
+            sdkLog('Python: ' + result.error);
+            if (result.traceback && getDebugMode && getDebugMode()) {
+              sdkLog('Python traceback:\n' + result.traceback);
+            }
+          }
           /* Search responses may include both error and results[] — always pass through. */
           onJsonLine(result);
         } catch {
-          /* non-JSON log lines */
+          // Non-JSON stdout (typically Python prints / tracebacks). With debug mode on, surface
+          // these to the panel so unexpected failures aren't silently swallowed.
+          if (getDebugMode && getDebugMode()) {
+            sdkLog('Python: ' + trimmed);
+          }
         }
       }
     });

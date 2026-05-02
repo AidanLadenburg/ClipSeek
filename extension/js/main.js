@@ -144,12 +144,55 @@
     }
   }
 
+  // Phases that should clear the status line so it doesn't linger between searches.
+  // Anything else (search_done, error states) we leave visible until the next search starts.
+  const STATUS_CLEAR_DELAY_MS = 4000;
+  let statusClearTimer = null;
+
+  function setSearchStatus(payload) {
+    const el = document.getElementById('searchStatusLine');
+    if (!el || !payload || typeof payload.message !== 'string') return;
+
+    const phase = String(payload.phase || '');
+    const isError = payload.level === 'error' || phase.endsWith('_error');
+    const isDone = phase === 'search_done' || phase === 'embeddings_reloaded' || phase === 'embeddings_cleared';
+
+    el.textContent = payload.message;
+    el.classList.toggle('is-error', !!isError);
+    el.classList.toggle('is-done', !!isDone && !isError);
+    el.hidden = false;
+
+    if (statusClearTimer) {
+      clearTimeout(statusClearTimer);
+      statusClearTimer = null;
+    }
+    if (isDone || isError) {
+      statusClearTimer = setTimeout(() => {
+        el.hidden = true;
+        el.classList.remove('is-error', 'is-done');
+      }, STATUS_CLEAR_DELAY_MS);
+    }
+  }
+
+  function clearSearchStatus() {
+    const el = document.getElementById('searchStatusLine');
+    if (!el) return;
+    if (statusClearTimer) {
+      clearTimeout(statusClearTimer);
+      statusClearTimer = null;
+    }
+    el.hidden = true;
+    el.textContent = '';
+    el.classList.remove('is-error', 'is-done');
+  }
+
   const bridge = createSearchBridge({
     sdkLog,
     getDebugMode,
     onClipseekUiEvent: (payload) => {
       if (payload && typeof payload.message === 'string') {
         sdkLog(payload.message);
+        setSearchStatus(payload);
       }
     },
     onPythonReady: () => setClipseekReadyIndicator('ready'),
@@ -220,6 +263,7 @@
       const newEmbeddingFolder = document.getElementById('embeddingFolderInput').value;
       const newVideoFolder = document.getElementById('videoFolderInput').value;
       const prevEmbeddingFolder = selectedFolders.embeddingFolder;
+      const prevVideoFolder = selectedFolders.videoFolder;
 
       localStorage.setItem('proxyLocation', document.getElementById('proxyLocation').value);
       localStorage.setItem('fullResLocation', document.getElementById('fullResLocation').value);
@@ -231,18 +275,37 @@
       localStorage.setItem('embeddingFolder', newEmbeddingFolder);
       localStorage.setItem('videoFolder', newVideoFolder);
 
-      if (newEmbeddingFolder !== prevEmbeddingFolder) {
-        ensureBridgeReady().then(() => {
-          bridge.sendJson({
-            command: 'update_embedding_folder',
-            embedding_folder: newEmbeddingFolder,
-            video_folder: newVideoFolder,
-          });
-        });
-      }
+      const folderChanged =
+        newEmbeddingFolder !== prevEmbeddingFolder || newVideoFolder !== prevVideoFolder;
 
       settingsPage.hidden = true;
       mainPage.hidden = false;
+
+      if (folderChanged) {
+        // Surface immediate panel feedback; the real "loaded" status arrives from python.
+        setSearchStatus({
+          phase: 'embeddings_saving',
+          message: newEmbeddingFolder
+            ? `ClipSeek: Reloading embeddings from ${newEmbeddingFolder}…`
+            : 'ClipSeek: Clearing embedding folder…',
+        });
+        ensureBridgeReady()
+          .then(() => {
+            bridge.sendJson({
+              command: 'update_embedding_folder',
+              embedding_folder: newEmbeddingFolder,
+              video_folder: newVideoFolder,
+            });
+          })
+          .catch((err) => {
+            console.error(err);
+            setSearchStatus({
+              phase: 'embeddings_error',
+              level: 'error',
+              message: 'ClipSeek: Could not start backend to reload embeddings.',
+            });
+          });
+      }
     });
 
     let folderDialogOpen = false;
@@ -272,11 +335,25 @@
 
       results.resetDisplayCount();
       results.clearSelected();
+      const metaLine = document.getElementById('searchMetaLine');
+      if (metaLine) {
+        metaLine.hidden = true;
+        metaLine.textContent = '';
+      }
+      setSearchStatus({
+        phase: 'search_request',
+        message: `ClipSeek: Sending query “${event.target.value.slice(0, 80)}”…`,
+      });
 
       try {
         await ensureBridgeReady();
       } catch {
         sdkLog('Error starting search process');
+        setSearchStatus({
+          phase: 'search_error',
+          level: 'error',
+          message: 'ClipSeek: Could not start search backend.',
+        });
         return;
       }
 
@@ -330,8 +407,20 @@
       });
     });
 
-    document.getElementById('meanMaxSwitch').addEventListener('change', (e) => {
-      localStorage.setItem('isMean', JSON.stringify(e.target.checked));
+    function applyScoringUi(isMean) {
+      document.querySelectorAll('.segmented__btn[data-scoring]').forEach((btn) => {
+        const active = btn.dataset.scoring === (isMean ? 'mean' : 'max');
+        btn.classList.toggle('is-active', active);
+        btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+      });
+    }
+
+    document.querySelectorAll('.segmented__btn[data-scoring]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const isMean = btn.dataset.scoring === 'mean';
+        localStorage.setItem('isMean', JSON.stringify(isMean));
+        applyScoringUi(isMean);
+      });
     });
 
     document.getElementById('debugSwitch').addEventListener('change', (e) => {
@@ -548,7 +637,7 @@
     document.getElementById('annotationFolder').value = selectedFolders.annotationFolder;
     document.getElementById('proxyLocation').value = localStorage.getItem('proxyLocation') || '';
     document.getElementById('fullResLocation').value = localStorage.getItem('fullResLocation') || '';
-    document.getElementById('meanMaxSwitch').checked = JSON.parse(localStorage.getItem('isMean') || 'true');
+    applyScoringUi(JSON.parse(localStorage.getItem('isMean') || 'true'));
     const searchModeSwitch = document.getElementById('searchModeSwitch');
     if (searchModeSwitch) {
       searchModeSwitch.checked = localStorage.getItem('searchMode') === 'faiss';

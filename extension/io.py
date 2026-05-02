@@ -5,6 +5,7 @@ import os
 import torch
 import time
 import math
+import traceback
 from datetime import datetime
 import gc
 from concurrent.futures import ThreadPoolExecutor
@@ -20,8 +21,6 @@ SEARCH_GATHER_CHUNK_ROWS = 65536
 from cosmos_embedder import CosmosEmbedder
 from clipseek_video import load_clipseek_video_pickle
 from embed_cache_v2 import (
-    MATRIX_NAME,
-    load_corpus_row_owner,
     load_v2_objects,
     max_per_video_embedding_mtime,
     save_v2_from_objects,
@@ -44,15 +43,31 @@ except ImportError as _faiss_err:
         f"  ({_FAISS_IMPORT_ERROR})\n"
     )
 
-# FAISS: probe many chunks, then exact GPU rerank on top candidate videos only.
-FAISS_PROBE_K_MULT = 200
-FAISS_MAX_RERANK_VIDEOS = 3500
-FAISS_ADD_BATCH = 50000
+# FAISS: probe video-level candidates, then exact GPU rerank on those videos.
+# The old HNSW implementation indexed every chunk at first search, which could take
+# minutes or exhaust memory on large libraries before the panel saw a result.
+FAISS_MAX_RERANK_VIDEOS = 1000
+FAISS_MIN_RERANK_VIDEOS = 100
+FAISS_RERANK_FRACTION = 0.35
+FAISS_ADD_BATCH = 10000
+FAISS_PROBE_REP_MULT = 8
+FAISS_MIN_PROBE_REPS = 5000
 
 
 def _clipseek_ui(phase: str, message: str, **extra) -> None:
     """Single-line JSON for the CEP panel (Premiere alerts + UI); not mixed with search JSON."""
     payload = {"phase": phase, "message": message, **extra}
+    sys.stdout.write("CLIPSEEK_UI " + json.dumps(payload, ensure_ascii=True) + "\n")
+    sys.stdout.flush()
+
+
+def _clipseek_error(message: str, *, exc: BaseException = None, phase: str = "error") -> None:
+    """Send an error event to the panel; full traceback in ``traceback`` for debug-mode display."""
+    payload = {"phase": phase, "message": message, "level": "error"}
+    if exc is not None:
+        payload["traceback"] = "".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        )
     sys.stdout.write("CLIPSEEK_UI " + json.dumps(payload, ensure_ascii=True) + "\n")
     sys.stdout.flush()
 
@@ -187,7 +202,10 @@ class PersistentSearch:
         self.current_video_folder = video_folder
         self._faiss_index = None
         self._faiss_index_embedding_path = None
-        self._faiss_row_owner = None
+        self._faiss_rep_video_ids = None
+        self._last_faiss_reason = ""
+        self._last_faiss_candidate_count = 0
+        self._last_faiss_total_count = 0
         if embedding_folder:
             print("loading startup embedding folder", flush=True)
             self.cached_objects = self.load_objs(video_folder, embedding_folder)
@@ -218,6 +236,10 @@ class PersistentSearch:
         ):
             return
         self._clear_faiss_cache()
+        # Drop stale cached objects BEFORE updating current_embedding_folder, otherwise the
+        # cache-hit short-circuit in load_objs (which keys off current_embedding_folder) returns
+        # the previous folder's objects and the panel keeps searching the old library.
+        self.cached_objects = None
         self.current_embedding_folder = new_folder
         self.current_video_folder = video_folder
         if not new_folder:
@@ -230,13 +252,22 @@ class PersistentSearch:
             return
         _clipseek_ui(
             "cache_loading",
-            "ClipSeek: Loading embedding cache…",
+            f"ClipSeek: Loading embeddings from {new_folder}…",
         )
-        self.cached_objects = self.load_objs(video_folder, new_folder)
+        try:
+            self.cached_objects = self.load_objs(video_folder, new_folder)
+        except Exception as e:
+            self.cached_objects = []
+            _clipseek_error(
+                f"ClipSeek: Failed to load embedding folder: {e}",
+                exc=e,
+                phase="embeddings_error",
+            )
+            return
         n = len(self.cached_objects) if self.cached_objects else 0
         _clipseek_ui(
             "embeddings_reloaded",
-            f"ClipSeek: Embeddings loaded — ready to search ({n} videos)."
+            f"ClipSeek: Embedding folder reloaded — ready to search ({n} videos)."
             if n
             else "ClipSeek: Embedding folder has no indexed videos yet.",
             videos=n,
@@ -245,7 +276,41 @@ class PersistentSearch:
     def _clear_faiss_cache(self):
         self._faiss_index = None
         self._faiss_index_embedding_path = None
-        self._faiss_row_owner = None
+        self._faiss_rep_video_ids = None
+
+    def _reset_faiss_status(self):
+        self._last_faiss_reason = ""
+        self._last_faiss_candidate_count = 0
+        self._last_faiss_total_count = 0
+
+    def _faiss_skip(self, reason: str):
+        self._last_faiss_reason = reason
+        self._last_faiss_candidate_count = 0
+        self._last_faiss_total_count = 0
+        print(f"FAISS skipped: {reason}", flush=True)
+        return None
+
+    def _faiss_precheck_reason(
+        self,
+        matrix_shared,
+        embeddings_path: str,
+        vid_objs,
+        has_query: bool,
+        has_anno: bool,
+    ) -> str:
+        if not _FAISS_AVAILABLE:
+            return "faiss-cpu is not installed"
+        if not embeddings_path:
+            return "no embedding folder is loaded"
+        if matrix_shared is None:
+            return "FAISS needs the mmap embedding cache; regenerate or reload the embedding cache"
+        if not has_query:
+            return "annotation-only queries use exact search"
+        if has_anno:
+            return "annotation-assisted queries use exact search"
+        if not all(hasattr(o, "_corpus_video_index") for o in vid_objs):
+            return "the loaded embeddings do not expose FAISS corpus metadata"
+        return ""
 
     def create_annotation(self, folder, key, annotation_type, value):
         if not os.path.exists(folder):
@@ -289,11 +354,21 @@ class PersistentSearch:
                 search_mode = "exact"
             faiss_requested = search_mode == "faiss"
 
+            short_name = os.path.basename(file_path) if file_path else "(file)"
+            _clipseek_ui(
+                "search_start",
+                f"ClipSeek: Searching by {query_type} — {short_name}…",
+            )
+
             t_load0 = time.time()
             vid_objs = self.load_objs(video_folder, embedding_folder)
             load_seconds = time.time() - t_load0
 
             if not vid_objs:
+                _clipseek_ui(
+                    "search_empty",
+                    "ClipSeek: No embeddings loaded — choose an embedding folder in Settings.",
+                )
                 return {
                     "results": [],
                     "search_seconds": time.time() - t_wall,
@@ -302,40 +377,55 @@ class PersistentSearch:
                     "faiss_used": False,
                     "faiss_requested": faiss_requested,
                     "faiss_available": _FAISS_AVAILABLE,
+                    "faiss_reason": "no embeddings are loaded" if faiss_requested else "",
+                    "faiss_candidates": 0,
+                    "faiss_total_candidates": 0,
                 }
 
+            _clipseek_ui("search_encode", f"ClipSeek: Encoding {query_type} query…")
             if query_type == "image":
                 q = self.embedder.get_image_feat(file_path).to(self.device)
             elif query_type == "video":
                 q = self.embedder.get_vid_feat_tensor(fix_path(file_path)).to(self.device)
             else:
+                _clipseek_error(f"ClipSeek: Unsupported query type: {query_type}")
                 return {"error": "Unsupported query type", "results": []}
+
+            _clipseek_ui(
+                "search_compute",
+                f"ClipSeek: Comparing against {len(vid_objs)} videos ({search_mode})…",
+            )
 
             emb_path = embedding_folder or self.current_embedding_folder or ""
             matrix_shared = _vid_objs_shared_corpus_matrix(vid_objs)
             faiss_used = False
+            faiss_reason = ""
             t_sim0 = time.time()
             final_sims = None
 
-            if (
-                faiss_requested
-                and matrix_shared is not None
-                and emb_path
-                and _FAISS_AVAILABLE
-                and all(hasattr(o, "_corpus_video_index") for o in vid_objs)
-            ):
-                fr = self._try_faiss_rerank_videos(
-                    q,
-                    vid_objs,
+            if faiss_requested:
+                self._reset_faiss_status()
+                faiss_reason = self._faiss_precheck_reason(
                     matrix_shared,
-                    is_mean,
-                    False,
-                    True,
                     emb_path,
+                    vid_objs,
+                    True,
+                    False,
                 )
-                if fr is not None:
-                    final_sims = fr
-                    faiss_used = True
+                if not faiss_reason:
+                    fr = self._try_faiss_rerank_videos(
+                        q,
+                        vid_objs,
+                        matrix_shared,
+                        is_mean,
+                        False,
+                        True,
+                        emb_path,
+                    )
+                    faiss_reason = self._last_faiss_reason
+                    if fr is not None:
+                        final_sims = fr
+                        faiss_used = True
 
             if final_sims is None:
                 with torch.no_grad():
@@ -372,19 +462,31 @@ class PersistentSearch:
                 t_sec = torch.argmax(si).item() * chunk_stride_sec(vid)
                 out.append([vid.path, t_sec])
 
+            total = time.time() - t_wall
+            _clipseek_ui(
+                "search_done",
+                f"ClipSeek: Done — {len(out)} results in {total:.2f}s.",
+                results=len(out),
+                seconds=total,
+            )
             return {
                 "results": out,
-                "search_seconds": time.time() - t_wall,
+                "search_seconds": total,
                 "load_seconds": load_seconds,
                 "retrieve_seconds": retrieve_seconds,
                 "faiss_used": faiss_used,
                 "faiss_requested": faiss_requested,
                 "faiss_available": _FAISS_AVAILABLE,
+                "faiss_reason": faiss_reason,
+                "faiss_candidates": self._last_faiss_candidate_count if faiss_used else 0,
+                "faiss_total_candidates": self._last_faiss_total_count if faiss_used else 0,
             }
 
         except Exception as e:
-            print(f"error with image search {e}", flush=True)
-            return {"error": str(e), "results": []}
+            tb = traceback.format_exc()
+            print(f"error with image search {e}\n{tb}", flush=True)
+            _clipseek_error(f"ClipSeek: Search failed — {e}", exc=e, phase="search_error")
+            return {"error": str(e), "traceback": tb, "results": []}
 
     def filter_metadata(self, vid_objs, date_from=None, date_to=None, embeddings_folder=None):
         if not vid_objs:
@@ -567,34 +669,125 @@ class PersistentSearch:
     def sigmoid(self, x: list, r=5, c=0.5):
         return [0 if i == 0 else 1 / (1 + math.exp(-r * (i - c))) for i in x]
 
-    def _ensure_faiss_index(self, embeddings_path: str):
+    def _faiss_source_objects(self, embeddings_path: str, vid_objs):
+        source_objs = None
+        if (
+            self.cached_objects is not None
+            and embeddings_path == self.current_embedding_folder
+            and _vid_objs_shared_corpus_matrix(self.cached_objects) is not None
+        ):
+            source_objs = self.cached_objects
+        else:
+            source_objs = vid_objs
+
+        if not source_objs:
+            return [], None
+        matrix = _vid_objs_shared_corpus_matrix(source_objs)
+        if matrix is None:
+            return [], None
+        required = ("_corpus_video_index", "_corpus_row_start", "_corpus_n_chunks")
+        if not all(all(hasattr(o, attr) for attr in required) for o in source_objs):
+            return [], None
+        return source_objs, matrix
+
+    def _ensure_faiss_index(self, embeddings_path: str, vid_objs):
         if not _FAISS_AVAILABLE:
             return None
         if self._faiss_index is not None and self._faiss_index_embedding_path == embeddings_path:
             return self._faiss_index
-        matrix_path = os.path.join(embeddings_path, MATRIX_NAME)
-        if not os.path.isfile(matrix_path):
+
+        source_objs, matrix = self._faiss_source_objects(embeddings_path, vid_objs)
+        if matrix is None or not source_objs:
             return None
-        matrix = np.load(matrix_path, mmap_mode="r")
-        N, D = int(matrix.shape[0]), int(matrix.shape[1])
-        row_own = load_corpus_row_owner(embeddings_path)
-        if row_own.shape[0] != N:
-            print("FAISS: row_owner length mismatch matrix rows.", flush=True)
+
+        N = int(matrix.shape[0])
+        D = int(matrix.shape[1])
+        if N == 0 or D == 0:
             return None
-        print(f"Building FAISS HNSW index ({N} vectors, dim {D})...", flush=True)
+
+        rep_sources = []
+        for o in source_objs:
+            nc = int(getattr(o, "_corpus_n_chunks"))
+            if nc <= 0:
+                continue
+            rep_sources.append(
+                (
+                    int(getattr(o, "_corpus_video_index")),
+                    int(getattr(o, "_corpus_row_start")),
+                    nc,
+                )
+            )
+        if not rep_sources:
+            return None
+
+        _clipseek_ui(
+            "faiss_building",
+            f"ClipSeek: Preparing FAISS candidate index ({len(rep_sources)} videos)...",
+            videos=len(rep_sources),
+        )
+        print(
+            f"Building FAISS video candidate index ({len(rep_sources)} videos, dim {D})...",
+            flush=True,
+        )
         t0 = time.time()
-        index = faiss.IndexHNSWFlat(D, 32)
-        index.hnsw.efSearch = 128
-        for s in range(0, N, FAISS_ADD_BATCH):
-            e = min(s + FAISS_ADD_BATCH, N)
-            x = np.ascontiguousarray(matrix[s:e].astype(np.float32, copy=False))
-            faiss.normalize_L2(x)
-            index.add(x)
-        print(f"FAISS index ready in {time.time() - t0:.2f}s.", flush=True)
-        self._faiss_index = index
-        self._faiss_index_embedding_path = embeddings_path
-        self._faiss_row_owner = row_own
-        return index
+
+        try:
+            index = faiss.IndexFlatIP(D)
+            rep_video_ids = np.empty(len(rep_sources), dtype=np.int32)
+            batch_size = min(FAISS_ADD_BATCH, len(rep_sources))
+            reps_batch = np.empty((batch_size, D), dtype=np.float32)
+            batch_count = 0
+            report_step = max(1000, len(rep_sources) // 10)
+            last_reported = 0
+
+            for i, (corpus_video_index, row_start, n_chunks) in enumerate(rep_sources, start=1):
+                arr = np.asarray(
+                    matrix[row_start : row_start + n_chunks],
+                    dtype=np.float32,
+                )
+                norms = np.linalg.norm(arr, axis=1, keepdims=True)
+                arr_norm = arr / np.maximum(norms, 1e-8)
+                reps_batch[batch_count] = arr_norm.mean(axis=0)
+                rep_video_ids[i - 1] = corpus_video_index
+                batch_count += 1
+                del arr, norms, arr_norm
+                if batch_count == batch_size:
+                    index.add(np.ascontiguousarray(reps_batch[:batch_count]))
+                    batch_count = 0
+
+                if i == len(rep_sources) or i - last_reported >= report_step:
+                    _clipseek_ui(
+                        "faiss_progress",
+                        f"ClipSeek: Preparing FAISS candidates {i} / {len(rep_sources)}...",
+                        loaded=i,
+                        total=len(rep_sources),
+                    )
+                    last_reported = i
+
+            if batch_count:
+                index.add(np.ascontiguousarray(reps_batch[:batch_count]))
+            del reps_batch
+            gc.collect()
+
+            self._faiss_index = index
+            self._faiss_index_embedding_path = embeddings_path
+            self._faiss_rep_video_ids = rep_video_ids
+            print(f"FAISS candidate index ready in {time.time() - t0:.2f}s.", flush=True)
+            _clipseek_ui(
+                "faiss_ready",
+                f"ClipSeek: FAISS candidate index ready in {time.time() - t0:.2f}s.",
+                videos=len(rep_sources),
+            )
+            return index
+        except Exception as e:
+            self._clear_faiss_cache()
+            print(f"FAISS index build failed: {e}", flush=True)
+            _clipseek_error(
+                f"ClipSeek: FAISS index failed; using exact search: {e}",
+                exc=e,
+                phase="faiss_error",
+            )
+            return None
 
     def _try_faiss_rerank_videos(
         self,
@@ -607,17 +800,36 @@ class PersistentSearch:
         embeddings_path: str,
     ):
         """Approximate ANN probe + exact batched rerank on candidate videos. Returns tensor or None."""
-        if not _FAISS_AVAILABLE or has_anno or not has_query:
-            return None
+        self._reset_faiss_status()
+        if not _FAISS_AVAILABLE:
+            return self._faiss_skip("faiss-cpu is not installed")
+        if has_anno:
+            return self._faiss_skip("annotation-assisted queries use exact search")
+        if not has_query:
+            return self._faiss_skip("annotation-only queries use exact search")
         if not all(hasattr(o, "_corpus_video_index") for o in vid_objs):
-            return None
-        idx = self._ensure_faiss_index(embeddings_path)
-        row_own = self._faiss_row_owner
-        if idx is None or row_own is None:
-            print("FAISS unavailable; using exact search.", flush=True)
-            return None
+            return self._faiss_skip("the loaded embeddings do not expose FAISS corpus metadata")
         allowed = {int(getattr(o, "_corpus_video_index")) for o in vid_objs}
-        N = int(row_own.shape[0])
+        if not allowed:
+            return self._faiss_skip("no candidate videos are available after filters")
+        if len(allowed) <= FAISS_MIN_RERANK_VIDEOS:
+            return self._faiss_skip(
+                f"only {len(allowed)} candidate videos; exact search is faster at this size"
+            )
+        target_videos = max(
+            FAISS_MIN_RERANK_VIDEOS,
+            int(math.ceil(len(allowed) * FAISS_RERANK_FRACTION)),
+        )
+        target_videos = min(FAISS_MAX_RERANK_VIDEOS, target_videos, len(allowed) - 1)
+        if target_videos <= 0:
+            return self._faiss_skip("candidate set is too small for FAISS to narrow")
+
+        idx = self._ensure_faiss_index(embeddings_path, vid_objs)
+        rep_video_ids = self._faiss_rep_video_ids
+        if idx is None or rep_video_ids is None:
+            return self._faiss_skip("could not prepare the FAISS candidate index")
+
+        N = int(idx.ntotal)
         q = query_feat.float()
         if q.dim() == 1:
             q = q.unsqueeze(0)
@@ -625,28 +837,35 @@ class PersistentSearch:
         probe = F.normalize(q.mean(dim=0, keepdim=True), dim=1)
         probe_np = probe.detach().cpu().numpy().astype(np.float32)
         faiss.normalize_L2(probe_np)
-        k_search = min(N, max(5000, 500 * FAISS_PROBE_K_MULT))
-        dists, idxs = idx.search(probe_np, k_search)
+
         vid_hit = {}
-        for row_i, di in zip(idxs[0], dists[0]):
-            if row_i < 0:
-                continue
-            cv = int(row_own[row_i])
-            if cv not in allowed:
-                continue
-            vid_hit[cv] = max(vid_hit.get(cv, -1e9), float(di))
-        if len(vid_hit) < min(20, max(1, len(allowed) // 10)):
-            print("FAISS probe too sparse; using exact search.", flush=True)
-            return None
-        ranked = sorted(vid_hit.keys(), key=lambda v: vid_hit[v], reverse=True)[
-            : min(FAISS_MAX_RERANK_VIDEOS, len(vid_hit))
-        ]
+        k_search = min(
+            N,
+            max(FAISS_MIN_PROBE_REPS, target_videos * FAISS_PROBE_REP_MULT),
+        )
+        while True:
+            dists, idxs = idx.search(probe_np, k_search)
+            for rep_i, di in zip(idxs[0], dists[0]):
+                if rep_i < 0 or rep_i >= rep_video_ids.shape[0]:
+                    continue
+                cv = int(rep_video_ids[rep_i])
+                if cv not in allowed:
+                    continue
+                vid_hit[cv] = max(vid_hit.get(cv, -1e9), float(di))
+            if len(vid_hit) >= target_videos or k_search >= N:
+                break
+            k_search = min(N, k_search * 2)
+
+        if not vid_hit:
+            return self._faiss_skip("FAISS returned no candidate videos")
+
+        ranked = sorted(vid_hit.keys(), key=lambda v: vid_hit[v], reverse=True)[:target_videos]
         top_allowed = set(ranked)
         narrow_objs = [
             o for o in vid_objs if int(getattr(o, "_corpus_video_index")) in top_allowed
         ]
         if not narrow_objs:
-            return None
+            return self._faiss_skip("FAISS candidates were removed by the active filters")
         gather_n, split_n = _gather_chunk_indices_and_split_sizes(narrow_objs)
         with torch.no_grad():
             qn = query_feat
@@ -674,8 +893,12 @@ class PersistentSearch:
             if torch.isinf(full[i]):
                 vid_objs[i].sims = torch.tensor([0.0], device=self.device)
         if not torch.isfinite(full).any():
-            print("FAISS rerank produced no scores; using exact search.", flush=True)
-            return None
+            return self._faiss_skip("FAISS rerank produced no finite scores")
+        self._last_faiss_candidate_count = len(narrow_objs)
+        self._last_faiss_total_count = len(allowed)
+        self._last_faiss_reason = (
+            f"selected {len(narrow_objs)} of {len(allowed)} videos for exact rerank"
+        )
         return full
 
     def retrieve_vids(
@@ -730,6 +953,9 @@ class PersistentSearch:
                 "faiss_requested": search_mode == "faiss",
                 "faiss_available": _FAISS_AVAILABLE,
                 "retrieve_seconds": 0.0,
+                "faiss_reason": "no embeddings are loaded" if search_mode == "faiss" else "",
+                "faiss_candidates": 0,
+                "faiss_total_candidates": 0,
             }
 
         start = time.time()
@@ -743,31 +969,39 @@ class PersistentSearch:
             gather_idx = None
             split_sizes_fs = None
 
-        if (
-            search_mode == "faiss"
-            and emb_path
-            and matrix_shared is not None
-            and has_query
-            and not has_anno
-        ):
-            fr = self._try_faiss_rerank_videos(
-                query_feat,
-                vid_objs,
+        faiss_reason = ""
+        if search_mode == "faiss":
+            self._reset_faiss_status()
+            faiss_reason = self._faiss_precheck_reason(
                 matrix_shared,
-                isMean,
-                has_anno,
-                has_query,
                 emb_path,
+                vid_objs,
+                has_query,
+                has_anno,
             )
-            if fr is not None:
-                elapsed = time.time() - start
-                print("Search (cos sim) in: ", elapsed, flush=True)
-                return fr, {
-                    "faiss_used": True,
-                    "faiss_requested": True,
-                    "faiss_available": True,
-                    "retrieve_seconds": elapsed,
-                }
+            if not faiss_reason:
+                fr = self._try_faiss_rerank_videos(
+                    query_feat,
+                    vid_objs,
+                    matrix_shared,
+                    isMean,
+                    has_anno,
+                    has_query,
+                    emb_path,
+                )
+                faiss_reason = self._last_faiss_reason
+                if fr is not None:
+                    elapsed = time.time() - start
+                    print("Search (cos sim) in: ", elapsed, flush=True)
+                    return fr, {
+                        "faiss_used": True,
+                        "faiss_requested": True,
+                        "faiss_available": True,
+                        "retrieve_seconds": elapsed,
+                        "faiss_reason": faiss_reason,
+                        "faiss_candidates": self._last_faiss_candidate_count,
+                        "faiss_total_candidates": self._last_faiss_total_count,
+                    }
 
         sims_split = None
         anno_sims_split = None
@@ -838,6 +1072,9 @@ class PersistentSearch:
             "faiss_requested": search_mode == "faiss",
             "faiss_available": _FAISS_AVAILABLE,
             "retrieve_seconds": elapsed,
+            "faiss_reason": faiss_reason,
+            "faiss_candidates": 0,
+            "faiss_total_candidates": 0,
         }
 
     def search_videos(
@@ -854,17 +1091,28 @@ class PersistentSearch:
     ):
         try:
             t_wall = time.time()
+            short_q = (str(query) if query is not None else "")[:80]
+            _clipseek_ui(
+                "search_start",
+                f"ClipSeek: Searching for “{short_q}”…" if short_q else "ClipSeek: Searching…",
+                query=short_q,
+            )
             t_load = time.time()
             vid_objs = self.load_objs(video_folder, embedding_folder)
             load_seconds = time.time() - t_load
             print("Objs loaded in: ", load_seconds, flush=True)
             if date_from or date_to:
+                _clipseek_ui("search_filter", "ClipSeek: Filtering by date…")
                 vid_objs = self.filter_metadata(vid_objs, date_from, date_to, embedding_folder)
             if isinstance(isMean, str):
                 isMean = isMean.lower() in ("true", "1", "yes")
             if search_mode not in ("exact", "faiss"):
                 search_mode = "exact"
             if not vid_objs:
+                _clipseek_ui(
+                    "search_empty",
+                    "ClipSeek: No embeddings loaded — choose an embedding folder in Settings.",
+                )
                 return {
                     "results": [],
                     "load_seconds": load_seconds,
@@ -873,7 +1121,15 @@ class PersistentSearch:
                     "faiss_used": False,
                     "faiss_requested": search_mode == "faiss",
                     "faiss_available": _FAISS_AVAILABLE,
+                    "faiss_reason": "no embeddings are loaded" if search_mode == "faiss" else "",
+                    "faiss_candidates": 0,
+                    "faiss_total_candidates": 0,
                 }
+            _clipseek_ui(
+                "search_compute",
+                f"ClipSeek: Comparing against {len(vid_objs)} videos ({search_mode}, {'mean' if isMean else 'max'})…",
+                videos=len(vid_objs),
+            )
             sims_tensor, retrieve_meta = self.retrieve_vids(
                 query,
                 annotation_folder,
@@ -883,6 +1139,7 @@ class PersistentSearch:
                 search_mode,
             )
             if sims_tensor.numel() == 0:
+                _clipseek_ui("search_empty", "ClipSeek: No matching videos.")
                 return {
                     "results": [],
                     "load_seconds": load_seconds,
@@ -891,6 +1148,9 @@ class PersistentSearch:
                     "faiss_used": retrieve_meta["faiss_used"],
                     "faiss_requested": retrieve_meta["faiss_requested"],
                     "faiss_available": retrieve_meta["faiss_available"],
+                    "faiss_reason": retrieve_meta.get("faiss_reason", ""),
+                    "faiss_candidates": retrieve_meta.get("faiss_candidates", 0),
+                    "faiss_total_candidates": retrieve_meta.get("faiss_total_candidates", 0),
                 }
             top_values, top_indices = torch.topk(
                 sims_tensor, k=min(len(vid_objs), 500), largest=True, sorted=True
@@ -902,19 +1162,31 @@ class PersistentSearch:
                 [i.path, (torch.argmax(i.sims) * chunk_stride_sec(i)).item()]
                 for i in top_vids
             ]
+            total = time.time() - t_wall
+            _clipseek_ui(
+                "search_done",
+                f"ClipSeek: Done — {len(times)} results in {total:.2f}s.",
+                results=len(times),
+                seconds=total,
+            )
             return {
                 "results": times,
                 "load_seconds": load_seconds,
                 "retrieve_seconds": retrieve_meta["retrieve_seconds"],
-                "search_seconds": time.time() - t_wall,
+                "search_seconds": total,
                 "faiss_used": retrieve_meta["faiss_used"],
                 "faiss_requested": retrieve_meta["faiss_requested"],
                 "faiss_available": retrieve_meta["faiss_available"],
+                "faiss_reason": retrieve_meta.get("faiss_reason", ""),
+                "faiss_candidates": retrieve_meta.get("faiss_candidates", 0),
+                "faiss_total_candidates": retrieve_meta.get("faiss_total_candidates", 0),
             }
 
         except Exception as e:
-            print(f"Error in search: {e}", flush=True)
-            return {"error": str(e), "results": []}
+            tb = traceback.format_exc()
+            print(f"Error in search: {e}\n{tb}", flush=True)
+            _clipseek_error(f"ClipSeek: Search failed — {e}", exc=e, phase="search_error")
+            return {"error": str(e), "traceback": tb, "results": []}
 
     def process_commands(self):
         while True:
@@ -968,15 +1240,24 @@ class PersistentSearch:
                             sm,
                         )
                         print(json.dumps(out), flush=True)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as e:
+                    _clipseek_error(f"ClipSeek: Invalid JSON command: {e}", phase="command_error")
                     print(json.dumps({"error": "Invalid JSON"}), flush=True)
                 except Exception as e:
-                    print(json.dumps({"error": str(e)}), flush=True)
+                    tb = traceback.format_exc()
+                    _clipseek_error(
+                        f"ClipSeek: Command failed — {e}",
+                        exc=e,
+                        phase="command_error",
+                    )
+                    print(json.dumps({"error": str(e), "traceback": tb}), flush=True)
 
             except EOFError:
                 break
             except Exception as e:
-                print(json.dumps({"error": str(e)}), flush=True)
+                tb = traceback.format_exc()
+                _clipseek_error(f"ClipSeek: I/O error — {e}", exc=e, phase="io_error")
+                print(json.dumps({"error": str(e), "traceback": tb}), flush=True)
 
 
 if __name__ == "__main__":

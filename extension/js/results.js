@@ -74,16 +74,21 @@ function createResultsController({ csInterface, getFullResPath, sdkLog }) {
         }
         let modeLabel = 'Exact GPU batched similarity';
         if (meta.faiss_used) {
-          modeLabel = 'FAISS approximate + exact GPU rerank';
+          modeLabel = 'FAISS candidate search + exact rerank';
+          if (meta.faiss_reason) {
+            modeLabel += ` (${meta.faiss_reason})`;
+          }
         } else if (meta.faiss_requested && meta.faiss_available === false) {
           modeLabel = 'Exact (install faiss-cpu for FAISS mode)';
-        } else if (meta.faiss_requested && !meta.faiss_used && meta.faiss_available) {
-          modeLabel = 'Exact (FAISS not used for this query — see io log if unexpected)';
+        }
+        if (meta.faiss_requested && !meta.faiss_used && meta.faiss_available) {
+          const reason = meta.faiss_reason ? `: ${meta.faiss_reason}` : '';
+          modeLabel = `Exact (FAISS skipped${reason})`;
         }
         if (meta.search_note) {
           modeLabel = meta.search_note;
         }
-        metaLine.textContent = `${modeLabel} · ${parts.join(' · ')}`;
+        metaLine.textContent = `${modeLabel} - ${parts.join(' - ')}`;
         metaLine.hidden = false;
         sdkLog(`ClipSeek: ${modeLabel}. ${parts.join(', ')}.`);
       } else {

@@ -34,6 +34,13 @@
                     </button>
                 </div>
                 <input type="file" id="fileInput" accept="image/*,video/*" hidden>
+                <div class="search-options">
+                    <span class="search-options__label">Scoring</span>
+                    <div class="segmented" role="group" aria-label="Scoring">
+                        <button type="button" class="segmented__btn is-active" data-scoring="mean" aria-pressed="true" title="Average similarity across the whole clip — good for thematic matches">Mean</button>
+                        <button type="button" class="segmented__btn" data-scoring="max" aria-pressed="false" title="Best single-chunk similarity — good for finding a specific moment">Max</button>
+                    </div>
+                </div>
                 <div id="filterMenu" class="filter-row" hidden>
                     <label class="field-label" for="dateFrom">From</label>
                     <input type="date" id="dateFrom" class="input input--date">
@@ -48,6 +55,7 @@
                 <button type="button" id="clearSelectedBtn" class="btn btn--ghost" hidden>Clear</button>
             </section>
 
+            <p id="searchStatusLine" class="search-status" hidden aria-live="polite"></p>
             <p id="searchMetaLine" class="search-meta" hidden aria-live="polite"></p>
             <section id="results" class="results-grid" aria-live="polite"></section>
             <button type="button" id="loadMoreBtn" class="btn btn--secondary load-more" hidden>Load more</button>
@@ -70,18 +78,6 @@
                 <div class="field-row">
                     <input type="text" id="embeddingFolderInput" class="input" placeholder="Path to embeddings output" readonly>
                     <button type="button" id="embeddingFolderSelectBtn" class="btn btn--secondary">Browse</button>
-                </div>
-            </div>
-
-            <div class="field">
-                <span class="field-label">Scoring</span>
-                <div class="toggle-row">
-                    <span>Max</span>
-                    <label class="switch">
-                        <input type="checkbox" id="meanMaxSwitch">
-                        <span class="slider round"></span>
-                    </label>
-                    <span>Mean</span>
                 </div>
             </div>
 
