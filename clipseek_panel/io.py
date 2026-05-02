@@ -78,7 +78,27 @@ def _clipseek_error(message: str, *, exc: BaseException = None, phase: str = "er
     sys.stdout.flush()
 
 
-def fix_path(path):
+def normalize_path_key(path):
+    """Filesystem-free key for matching cached video paths from the panel."""
+    if path is None:
+        return ""
+    working = str(path).strip().strip('"')
+    working = working.replace("\\\\", "\\")
+    working = working.replace("\\ ", " ")
+    working = working.replace("/ ", " ")
+    working = working.replace("\\", "/")
+    while "//" in working:
+        working = working.replace("//", "/")
+    working = working.rstrip("/")
+    if os.name == "nt":
+        working = working.lower()
+    return working
+
+
+def fix_path(path, log_missing=True):
+    if path is None:
+        return ""
+    path = str(path)
     working = path.replace("\\\\", "\\")
     working = working.replace("//", "/")
     working = working.replace("\\ ", "\\")
@@ -94,7 +114,8 @@ def fix_path(path):
         return working.replace(".mp4", ".wav.mp4")
     if os.path.exists(working.replace(".mp4", ".mp3.mp4")):
         return working.replace(".mp4", ".mp3.mp4")
-    print(f"failed to find working path {path}")
+    if log_missing:
+        print(f"failed to find working path {path}")
     return path
 
 
@@ -212,6 +233,7 @@ class PersistentSearch:
         self._last_faiss_reason = ""
         self._last_faiss_candidate_count = 0
         self._last_faiss_total_count = 0
+        self._path_lookup = {}
         self._exact_warmup_lock = threading.Lock()
         self._exact_warmup_thread = None
         self._exact_warmup_cancel = threading.Event()
@@ -252,10 +274,11 @@ class PersistentSearch:
         # cache-hit short-circuit in load_objs (which keys off current_embedding_folder) returns
         # the previous folder's objects and the panel keeps searching the old library.
         self.cached_objects = None
+        self._path_lookup = {}
         self.current_embedding_folder = new_folder
         self.current_video_folder = video_folder
         if not new_folder:
-            self.cached_objects = []
+            self._set_cached_objects([])
             _clipseek_ui(
                 "embeddings_cleared",
                 "ClipSeek: Embedding folder cleared.",
@@ -269,7 +292,7 @@ class PersistentSearch:
         try:
             self.cached_objects = self.load_objs(video_folder, new_folder)
         except Exception as e:
-            self.cached_objects = []
+            self._set_cached_objects([])
             _clipseek_error(
                 f"ClipSeek: Failed to load embedding folder: {e}",
                 exc=e,
@@ -289,6 +312,29 @@ class PersistentSearch:
         self._faiss_index = None
         self._faiss_index_embedding_path = None
         self._faiss_rep_video_ids = None
+
+    def _set_cached_objects(self, objects):
+        self.cached_objects = objects
+        self._path_lookup = {}
+        for obj in objects or []:
+            key = normalize_path_key(getattr(obj, "path", ""))
+            if key and key not in self._path_lookup:
+                self._path_lookup[key] = obj
+
+    def _find_video_by_path(self, vid_objs, query_path):
+        query_key = normalize_path_key(query_path)
+        if not query_key:
+            return None
+
+        match = self._path_lookup.get(query_key)
+        if match is not None:
+            return match
+
+        # Handles filtered/ad-hoc object lists without touching the filesystem.
+        for obj in vid_objs or []:
+            if normalize_path_key(getattr(obj, "path", "")) == query_key:
+                return obj
+        return None
 
     def _cancel_exact_warmup(self):
         ev = getattr(self, "_exact_warmup_cancel", None)
@@ -698,7 +744,7 @@ class PersistentSearch:
                     f"Using mmap cache ({len(cached_objects)} videos) in {dt:.2f}s.",
                     flush=True,
                 )
-                self.cached_objects = cached_objects
+                self._set_cached_objects(cached_objects)
                 self.current_video_folder = video_folder
                 self.current_embedding_folder = embeddings_path
                 self._start_exact_warmup(embeddings_path, cached_objects)
@@ -721,7 +767,7 @@ class PersistentSearch:
                 "cache_error",
                 f"ClipSeek: Cannot read embedding folder: {e}",
             )
-            self.cached_objects = []
+            self._set_cached_objects([])
             return []
 
         n_pkls = len(disk_pkls)
@@ -731,7 +777,7 @@ class PersistentSearch:
                 "ClipSeek: No per-video .pkl files in this folder.",
                 videos=0,
             )
-            self.cached_objects = []
+            self._set_cached_objects([])
             return []
 
         _clipseek_ui(
@@ -777,7 +823,7 @@ class PersistentSearch:
 
         by_path = {}
         for obj in all_objects:
-            key = fix_path(getattr(obj, "path", ""))
+            key = normalize_path_key(getattr(obj, "path", ""))
             by_path[key] = obj
         merged = list(by_path.values())
 
@@ -796,7 +842,7 @@ class PersistentSearch:
                 f"ClipSeek: Could not save mmap cache: {e}",
             )
 
-        self.cached_objects = merged
+        self._set_cached_objects(merged)
         self.current_video_folder = video_folder
         self.current_embedding_folder = embeddings_path
         self._start_exact_warmup(embeddings_path, merged)
@@ -1073,14 +1119,13 @@ class PersistentSearch:
             else:
                 has_query = False
         elif query_type == "video":
-            query_path = fix_path(query)
-            match = next(
-                (o for o in vid_objs if fix_path(o.path) == query_path),
-                None,
-            )
+            query_path = str(query or "")
+            match = self._find_video_by_path(vid_objs, query_path)
             if match is not None:
+                print(f"Using cached video embeddings for similar search: {match.path}", flush=True)
                 query_feat = chunks_to_tensor(match.chunks, self.device)
             else:
+                query_path = fix_path(query_path)
                 query_feat = self.embedder.get_vid_feat_tensor(query_path).to(self.device)
 
         if not vid_objs:
