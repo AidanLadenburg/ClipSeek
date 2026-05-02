@@ -8,6 +8,10 @@ Set-StrictMode -Version Latest
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $RequirementsFile = Join-Path $RepoRoot "requirements.txt"
+$PythonWingetId = "Python.Python.3.12"
+$FallbackPythonVersion = "3.12.10"
+$FallbackPythonInstallerUrl = "https://www.python.org/ftp/python/$FallbackPythonVersion/python-$FallbackPythonVersion-amd64.exe"
+$FallbackPythonInstallerPath = Join-Path $env:TEMP "clipseek_python-$FallbackPythonVersion-amd64.exe"
 
 function Write-Step {
     param([string]$Message)
@@ -18,7 +22,8 @@ function Write-Step {
 function Invoke-Checked {
     param(
         [string]$Exe,
-        [string[]]$ArgList
+        [string[]]$ArgList,
+        [int[]]$ValidExitCodes = @(0)
     )
 
     $shown = "$Exe $($ArgList -join ' ')"
@@ -28,7 +33,7 @@ function Invoke-Checked {
     }
 
     & $Exe @ArgList
-    if ($LASTEXITCODE -ne 0) {
+    if ($ValidExitCodes -notcontains $LASTEXITCODE) {
         throw "Command failed with exit code ${LASTEXITCODE}: $shown"
     }
 }
@@ -77,6 +82,16 @@ function Test-PythonCandidate {
     } catch {
         return $null
     }
+}
+
+function Test-SupportedPython {
+    param([object]$PythonInfo)
+    return (
+        $null -ne $PythonInfo -and
+        $PythonInfo.Major -eq 3 -and
+        $PythonInfo.Minor -ge 10 -and
+        $PythonInfo.Bits -eq 64
+    )
 }
 
 function Find-Python {
@@ -147,14 +162,109 @@ function Find-Python {
             }
     }
 
+    $seen = @{}
+    $bestUnsupported = $null
     foreach ($candidate in $candidates) {
         $result = Test-PythonCandidate -Exe $candidate.Exe -PrefixArgs $candidate.Args
         if ($null -ne $result) {
-            return $result
+            $key = "$($result.ResolvedExe)|$($result.Major).$($result.Minor)|$($result.Bits)"
+            if ($seen.ContainsKey($key)) {
+                continue
+            }
+            $seen[$key] = $true
+
+            if (Test-SupportedPython -PythonInfo $result) {
+                return $result
+            }
+            if ($null -eq $bestUnsupported) {
+                $bestUnsupported = $result
+            }
         }
     }
 
-    throw "Python was not found. Install 64-bit Python 3.10 or newer, then run this installer again."
+    if ($null -ne $bestUnsupported) {
+        Write-Host "Found unsupported Python: $($bestUnsupported.ResolvedExe) ($($bestUnsupported.Major).$($bestUnsupported.Minor), $($bestUnsupported.Bits)-bit)"
+    }
+    return $null
+}
+
+function Update-ProcessPath {
+    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $env:Path = (@($machinePath, $userPath) | Where-Object { $_ }) -join ";"
+}
+
+function Install-Python {
+    Write-Step "Installing Python"
+    Write-Host "No supported Python was found. Installing 64-bit Python 3.12 for the current user."
+
+    $winget = Get-Command "winget" -ErrorAction SilentlyContinue
+    if ($null -ne $winget) {
+        try {
+            Write-Host "Trying winget package: $PythonWingetId"
+            Invoke-Checked -Exe $winget.Source -ArgList @(
+                "install",
+                "--id", $PythonWingetId,
+                "--exact",
+                "--source", "winget",
+                "--scope", "user",
+                "--silent",
+                "--accept-package-agreements",
+                "--accept-source-agreements"
+            )
+            Update-ProcessPath
+            $python = Find-Python
+            if (Test-SupportedPython -PythonInfo $python) {
+                return $python
+            }
+            Write-Host "winget completed, but Python was not detected. Falling back to the official installer."
+        } catch {
+            Write-Host "winget Python install did not complete: $($_.Exception.Message)"
+            Write-Host "Falling back to the official Python installer from python.org."
+        }
+    } else {
+        Write-Host "winget was not found. Using the official Python installer from python.org."
+    }
+
+    Write-Host "Downloading: $FallbackPythonInstallerUrl"
+    Write-Host "To: $FallbackPythonInstallerPath"
+    if (-not $DryRun) {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -UseBasicParsing -Uri $FallbackPythonInstallerUrl -OutFile $FallbackPythonInstallerPath
+    }
+
+    Invoke-Checked `
+        -Exe $FallbackPythonInstallerPath `
+        -ArgList @(
+            "/quiet",
+            "InstallAllUsers=0",
+            "PrependPath=1",
+            "Include_launcher=1",
+            "Include_pip=1",
+            "Include_test=0",
+            "Include_doc=0",
+            "Shortcuts=0"
+        ) `
+        -ValidExitCodes @(0, 3010)
+
+    Update-ProcessPath
+    $installed = Find-Python
+    if (Test-SupportedPython -PythonInfo $installed) {
+        return $installed
+    }
+
+    if ($DryRun) {
+        return [pscustomobject]@{
+            Exe = "py"
+            PrefixArgs = @("-3")
+            ResolvedExe = "(Python 3.12 would be installed)"
+            Major = 3
+            Minor = 12
+            Bits = 64
+        }
+    }
+
+    throw "Python install finished, but a supported 64-bit Python 3.10+ could not be found. Restart Windows and run this installer again."
 }
 
 function Get-PytorchWheelIndex {
@@ -212,14 +322,10 @@ try {
     Write-Host "Repo: $RepoRoot"
 
     $python = Find-Python
+    if (-not (Test-SupportedPython -PythonInfo $python)) {
+        $python = Install-Python
+    }
     Write-Host "Python: $($python.ResolvedExe) ($($python.Major).$($python.Minor), $($python.Bits)-bit)"
-
-    if ($python.Major -ne 3 -or $python.Minor -lt 10) {
-        throw "ClipSeek requires Python 3.10 or newer."
-    }
-    if ($python.Bits -ne 64) {
-        throw "ClipSeek requires 64-bit Python. Install 64-bit Python and run this again."
-    }
 
     Write-Step "Upgrading pip"
     Invoke-Checked -Exe $python.Exe -ArgList ($python.PrefixArgs + @("-m", "pip", "install", "--user", "--upgrade", "pip", "setuptools", "wheel"))
@@ -272,7 +378,8 @@ if torch.cuda.is_available():
     Write-Step "Done"
     Write-Host "Installed ClipSeek libraries into this Python's user site-packages:"
     Write-Host "$($python.ResolvedExe)"
-    Write-Host "No virtual environment was created and no environment variables were changed."
+    Write-Host "No virtual environment was created."
+    Write-Host "If Python was installed by this script, it was installed for the current Windows user and added to the user PATH."
     Write-Host "Restart Premiere/Codex/terminals after install so they see the updated Python packages."
     exit 0
 } catch {

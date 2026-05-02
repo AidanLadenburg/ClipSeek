@@ -16,7 +16,8 @@ The embedder and the panel are separate: you run embedding when needed; editors 
 
 0. **Install Python dependencies**
    - Windows: double-click **`install_clipseek.bat`** from the repo root.
-   - The installer uses your installed 64-bit Python, installs packages into that Python's local user site-packages with `pip --user`, and does not create a virtual environment or change environment variables.
+   - The installer uses an existing 64-bit Python 3.10+ when available. If none is found, it installs 64-bit Python 3.12 for the current Windows user, then installs ClipSeek packages into that Python's local user site-packages with `pip --user`.
+   - It does not create a virtual environment. If it installs Python, Python is added to the current user's PATH, which is the normal Python installer behavior.
    - It installs PyTorch from the correct CPU/CUDA wheel index before installing the remaining ClipSeek dependencies.
 
 1. **Model weights**

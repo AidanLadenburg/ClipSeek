@@ -8,6 +8,7 @@ import math
 import traceback
 from datetime import datetime
 import gc
+import threading
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import torch.nn.functional as F
@@ -17,6 +18,11 @@ warnings.filterwarnings("ignore")
 
 # Rows of mmap gathered to GPU per batched similarity matmul (tune for VRAM).
 SEARCH_GATHER_CHUNK_ROWS = 65536
+# Background warmup reads one float per 4 KB page so Windows pulls the mmap into
+# standby/cache memory without allocating a second full copy of the corpus.
+EXACT_WARMUP_BLOCK_ROWS = 262144
+EXACT_WARMUP_PAGE_STRIDE_FLOATS = 1024
+EXACT_KERNEL_WARM_ROWS = 1024
 
 from cosmos_embedder import CosmosEmbedder
 from clipseek_video import load_clipseek_video_pickle
@@ -206,6 +212,11 @@ class PersistentSearch:
         self._last_faiss_reason = ""
         self._last_faiss_candidate_count = 0
         self._last_faiss_total_count = 0
+        self._exact_warmup_lock = threading.Lock()
+        self._exact_warmup_thread = None
+        self._exact_warmup_cancel = threading.Event()
+        self._exact_warmup_done_path = None
+        self._exact_warmup_active_path = None
         if embedding_folder:
             print("loading startup embedding folder", flush=True)
             self.cached_objects = self.load_objs(video_folder, embedding_folder)
@@ -236,6 +247,7 @@ class PersistentSearch:
         ):
             return
         self._clear_faiss_cache()
+        self._cancel_exact_warmup()
         # Drop stale cached objects BEFORE updating current_embedding_folder, otherwise the
         # cache-hit short-circuit in load_objs (which keys off current_embedding_folder) returns
         # the previous folder's objects and the panel keeps searching the old library.
@@ -277,6 +289,114 @@ class PersistentSearch:
         self._faiss_index = None
         self._faiss_index_embedding_path = None
         self._faiss_rep_video_ids = None
+
+    def _cancel_exact_warmup(self):
+        ev = getattr(self, "_exact_warmup_cancel", None)
+        if ev is not None:
+            ev.set()
+
+    def _start_exact_warmup(self, embeddings_path: str, vid_objs):
+        if not embeddings_path or not vid_objs:
+            return
+        matrix = _vid_objs_shared_corpus_matrix(vid_objs)
+        if matrix is None:
+            return
+
+        with self._exact_warmup_lock:
+            if self._exact_warmup_done_path == embeddings_path:
+                return
+            if (
+                self._exact_warmup_active_path == embeddings_path
+                and self._exact_warmup_thread is not None
+                and self._exact_warmup_thread.is_alive()
+            ):
+                return
+
+            self._exact_warmup_cancel.set()
+            cancel = threading.Event()
+            self._exact_warmup_cancel = cancel
+            self._exact_warmup_active_path = embeddings_path
+            t = threading.Thread(
+                target=self._run_exact_warmup,
+                args=(embeddings_path, matrix, cancel),
+                daemon=True,
+                name="ClipSeekExactWarmup",
+            )
+            self._exact_warmup_thread = t
+            t.start()
+
+    def _run_exact_warmup(self, embeddings_path: str, matrix, cancel: threading.Event):
+        try:
+            n_rows = int(matrix.shape[0])
+            dim = int(matrix.shape[1]) if len(matrix.shape) > 1 else 0
+            if n_rows <= 0 or dim <= 0:
+                return
+
+            _clipseek_ui(
+                "exact_warmup",
+                f"ClipSeek: Warming exact-search cache ({n_rows} chunks)...",
+                chunks=n_rows,
+            )
+            t0 = time.time()
+            self._warm_exact_kernel(matrix, cancel)
+
+            checksum = 0.0
+            for s in range(0, n_rows, EXACT_WARMUP_BLOCK_ROWS):
+                if cancel.is_set():
+                    print("Exact-search warmup canceled.", flush=True)
+                    return
+                e = min(s + EXACT_WARMUP_BLOCK_ROWS, n_rows)
+                flat = np.asarray(matrix[s:e]).reshape(-1)
+                if flat.size:
+                    checksum += float(
+                        flat[::EXACT_WARMUP_PAGE_STRIDE_FLOATS].sum(dtype=np.float64)
+                    )
+
+            if cancel.is_set():
+                print("Exact-search warmup canceled.", flush=True)
+                return
+
+            dt = time.time() - t0
+            with self._exact_warmup_lock:
+                if self._exact_warmup_cancel is cancel:
+                    self._exact_warmup_done_path = embeddings_path
+                    self._exact_warmup_active_path = None
+            print(
+                f"Exact-search cache warm in {dt:.2f}s ({n_rows} chunks).",
+                flush=True,
+            )
+            _clipseek_ui(
+                "exact_warmup_done",
+                f"ClipSeek: Exact-search cache warm ({dt:.1f}s).",
+                chunks=n_rows,
+                seconds=dt,
+            )
+            # Keep checksum live so the page touches are not optimized away.
+            if checksum == float("inf"):
+                print("Exact-search warmup checksum overflow.", flush=True)
+        except Exception as e:
+            print(f"Exact-search warmup skipped: {e}", flush=True)
+
+    def _warm_exact_kernel(self, matrix, cancel: threading.Event):
+        if cancel.is_set():
+            return
+        rows = min(EXACT_KERNEL_WARM_ROWS, int(matrix.shape[0]))
+        if rows <= 0:
+            return
+        try:
+            sample = np.ascontiguousarray(matrix[:rows].astype(np.float32, copy=False))
+            if sample.size == 0:
+                return
+            with torch.inference_mode():
+                block = torch.from_numpy(sample).to(self.device, non_blocking=True)
+                block = F.normalize(block, dim=1)
+                q = torch.ones((1, block.shape[1]), device=self.device, dtype=torch.float32)
+                q = F.normalize(q, dim=1)
+                _ = (q @ block.T).max(dim=0).values
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize()
+        except Exception as e:
+            print(f"Exact-search kernel warmup skipped: {e}", flush=True)
 
     def _reset_faiss_status(self):
         self._last_faiss_reason = ""
@@ -347,6 +467,7 @@ class PersistentSearch:
         is_mean=True,
     ):
         try:
+            self._cancel_exact_warmup()
             t_wall = time.time()
             if isinstance(is_mean, str):
                 is_mean = is_mean.lower() in ("true", "1", "yes")
@@ -531,21 +652,29 @@ class PersistentSearch:
         N = int(gather_idx.shape[0])
         out = torch.empty(N, device=self.device, dtype=torch.float32)
         bs = SEARCH_GATHER_CHUNK_ROWS
+        contiguous_base = None
+        if int(gather_idx[-1]) - int(gather_idx[0]) + 1 == N:
+            contiguous_base = int(gather_idx[0])
         for s in range(0, N, bs):
             e = min(s + bs, N)
-            idx = gather_idx[s:e]
-            cpu = np.ascontiguousarray(matrix[idx].astype(np.float32, copy=False))
+            if contiguous_base is None:
+                idx = gather_idx[s:e]
+                rows = matrix[idx]
+            else:
+                rows = matrix[contiguous_base + s : contiguous_base + e]
+            cpu = np.ascontiguousarray(rows.astype(np.float32, copy=False))
             block = torch.from_numpy(cpu).to(self.device, non_blocking=True)
             block = F.normalize(block, dim=1)
             part = (q @ block.T).max(dim=0).values
             out[s:e] = part
-            del block, cpu, part
+            del block, cpu, part, rows
         return out
 
     def load_objs(self, video_folder, embeddings_path, chunk_size=1000, save_interval=50000):
         prev_emb = getattr(self, "current_embedding_folder", None)
         if prev_emb is not None and prev_emb != embeddings_path:
             self._clear_faiss_cache()
+            self._cancel_exact_warmup()
 
         if (
             embeddings_path == self.current_embedding_folder
@@ -572,6 +701,7 @@ class PersistentSearch:
                 self.cached_objects = cached_objects
                 self.current_video_folder = video_folder
                 self.current_embedding_folder = embeddings_path
+                self._start_exact_warmup(embeddings_path, cached_objects)
                 return cached_objects
             except Exception as e:
                 print(f"Mmap cache invalid ({e}); rebuilding from per-video .pkls.", flush=True)
@@ -654,6 +784,11 @@ class PersistentSearch:
         try:
             save_v2_from_objects(merged, embeddings_path)
             print("Saved mmap embedding cache (cached_embeddings.matrix.npy + .meta).", flush=True)
+            try:
+                merged = load_v2_objects(embeddings_path)
+                print("Reloaded mmap embedding cache after rebuild.", flush=True)
+            except Exception as e:
+                print(f"Could not reload mmap cache after rebuild: {e}", flush=True)
         except Exception as e:
             print(f"Error saving mmap cache: {e}", flush=True)
             _clipseek_ui(
@@ -664,6 +799,7 @@ class PersistentSearch:
         self.cached_objects = merged
         self.current_video_folder = video_folder
         self.current_embedding_folder = embeddings_path
+        self._start_exact_warmup(embeddings_path, merged)
         return merged
 
     def sigmoid(self, x: list, r=5, c=0.5):
@@ -1090,6 +1226,7 @@ class PersistentSearch:
         search_mode: str = "exact",
     ):
         try:
+            self._cancel_exact_warmup()
             t_wall = time.time()
             short_q = (str(query) if query is not None else "")[:80]
             _clipseek_ui(

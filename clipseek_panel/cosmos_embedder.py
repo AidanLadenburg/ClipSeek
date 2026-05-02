@@ -50,6 +50,23 @@ class CosmosEmbedder:
             torch_dtype=self.dtype,
         ).to(self.device)
         self.model.eval()
+        self._warm_text_encoder()
+
+    def _warm_text_encoder(self):
+        """Pay the first text-embedding/kernel setup cost before the first user search."""
+        if self.processor is None or self.model is None:
+            return
+        try:
+            text_inputs = self.processor(text=[""])
+            text_inputs = {k: v.to(self.device) for k, v in text_inputs.items()}
+            with self._autocast():
+                with torch.inference_mode():
+                    text_out = self.model.get_text_embeddings(**text_inputs)
+            _ = text_out.text_proj.float()
+            if self.device == "cuda":
+                torch.cuda.synchronize()
+        except Exception as e:
+            print(f"ClipSeek: text warmup skipped: {e}", flush=True)
 
     def _autocast(self):
         return torch.amp.autocast(
@@ -69,7 +86,7 @@ class CosmosEmbedder:
         text_inputs = self.processor(text=captions)
         text_inputs = {k: v.to(self.device) for k, v in text_inputs.items()}
         with self._autocast():
-            with torch.no_grad():
+            with torch.inference_mode():
                 text_out = self.model.get_text_embeddings(**text_inputs)
         feat = text_out.text_proj.float()
         feat = feat / feat.norm(dim=-1, keepdim=True).clamp(min=1e-8)
@@ -85,7 +102,7 @@ class CosmosEmbedder:
         video_inputs = self.processor(videos=batch)
         video_inputs = {k: v.to(self.device) for k, v in video_inputs.items()}
         with self._autocast():
-            with torch.no_grad():
+            with torch.inference_mode():
                 video_out = self.model.get_video_embeddings(**video_inputs)
         feat = video_out.visual_proj.float()
         feat = feat / feat.norm(dim=-1, keepdim=True).clamp(min=1e-8)
@@ -137,7 +154,7 @@ class CosmosEmbedder:
                 video_inputs = self.processor(videos=batch)
                 video_inputs = {k: v.to(self.device) for k, v in video_inputs.items()}
                 with self._autocast():
-                    with torch.no_grad():
+                    with torch.inference_mode():
                         video_out = self.model.get_video_embeddings(**video_inputs)
                 chunk_emb = video_out.visual_proj.float().cpu()
                 chunk_emb = chunk_emb / chunk_emb.norm(dim=-1, keepdim=True).clamp(min=1e-8)
