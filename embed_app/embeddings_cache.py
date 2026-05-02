@@ -27,8 +27,8 @@ LEGACY_MONOLITHIC_PKL = "cached_embeddings.pkl"
 
 # Tune: balance freshness vs I/O when embedding huge libraries. Each save rewrites
 # the full mmap matrix, so frequent saves can dominate embedding time.
-CACHE_SAVE_EVERY_N_VIDEOS = 250
-CACHE_SAVE_MIN_INTERVAL_SEC = 180.0
+CACHE_SAVE_EVERY_N_VIDEOS = 500
+CACHE_SAVE_MIN_INTERVAL_SEC = 1200
 
 
 # Match extension/io.py — used as dict keys when merging.
