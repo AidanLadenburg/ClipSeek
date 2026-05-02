@@ -1,3 +1,5 @@
-# ClipSeek Python dependencies — search backend (extension/io.py) and related.
-# For a focused list see extension/requirements-search.txt
--r extension/requirements-search.txt
+# ClipSeek full dependency set.
+#
+# Recommended on Windows: double-click install_clipseek.bat. It installs into
+# the user's active Python environment with pip --user and does not create a venv.
+-r requirements-clipseek.txt

@@ -1,9 +1,13 @@
-# Python dependencies for io.py / io.exe (Cosmos-Embed1 search backend)
-# faiss-cpu: optional but recommended — enables "FAISS" search mode in the panel (approximate ANN + GPU rerank).
-torch
-transformers>=4.46
-numpy
-decord
-Pillow
-einops
-faiss-cpu
+# Python dependencies for extension/io.py search backend.
+#
+# Recommended on Windows: run install_clipseek.bat from the repo root. It
+# installs into the user's active Python environment with pip --user.
+torch>=2.4,<3
+torchvision>=0.19,<1
+numpy>=1.26.4,<2.0
+decord==0.6.0
+transformers>=4.46,<5
+einops>=0.7,<1
+safetensors>=0.4.5,<1
+Pillow>=10.4,<13
+faiss-cpu>=1.8,<2

@@ -1,7 +1,12 @@
-# Python dependencies for NEW_embedd_app/embed_app.py (batch embedding GUI)
-torch
-transformers>=4.46
-numpy
-decord
-Pillow
-einops
+# Python dependencies for embed_app/embed_app.py.
+#
+# Recommended on Windows: run install_clipseek.bat from the repo root. It
+# installs into the user's active Python environment with pip --user.
+torch>=2.4,<3
+torchvision>=0.19,<1
+numpy>=1.26.4,<2.0
+decord==0.6.0
+transformers>=4.46,<5
+einops>=0.7,<1
+safetensors>=0.4.5,<1
+Pillow>=10.4,<13

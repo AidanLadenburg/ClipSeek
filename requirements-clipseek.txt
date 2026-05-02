@@ -1,0 +1,18 @@
+# ClipSeek shared Python dependencies.
+#
+# install_clipseek.bat installs PyTorch first from the correct CPU/CUDA wheel
+# index, then applies this file to the user's Python site-packages. Keep torch
+# out of this file so the second pip pass does not replace a CUDA build.
+
+# decord 0.6.0 is the available Windows wheel and was built before NumPy 2.
+numpy>=1.26.4,<2.0
+decord==0.6.0
+
+# Cosmos-Embed1 model/processor dependencies.
+transformers>=4.46,<5
+einops>=0.7,<1
+safetensors>=0.4.5,<1
+Pillow>=10.4,<13
+
+# FAISS mode in the Premiere search backend.
+faiss-cpu>=1.8,<2

@@ -14,15 +14,19 @@ The embedder and the panel are separate: you run embedding when needed; editors 
 
 ## Quick start
 
-1. **Model weights**  
-   - From the repo root:  
-     `python embed_app/download.py`  
-     Downloads into **`embed_app/cosmos_model/`** (gitignored).  
+0. **Install Python dependencies**
+   - Windows: double-click **`install_clipseek.bat`** from the repo root.
+   - The installer uses your installed 64-bit Python, installs packages into that Python's local user site-packages with `pip --user`, and does not create a virtual environment or change environment variables.
+   - It installs PyTorch from the correct CPU/CUDA wheel index before installing the remaining ClipSeek dependencies.
+
+1. **Model weights**
+   - From the repo root:
+     `python embed_app\download.py`
+     Downloads into **`embed_app/cosmos_model/`** (gitignored).
    - For search only, place **`cosmos_model`** next to **`extension/io.py`** (`extension/cosmos_model/`), or rely on the Hugging Face hub if online.
 
-2. **Embed videos**  
-   - Install: `pip install -r embed_app/requirements-embedder.txt`  
-   - Run: `python embed_app/embed_app.py`  
+2. **Embed videos**
+   - Run: `python embed_app\embed_app.py`
    - Set **input** folder, **output** (embedding) folder, chunk size (default 10s), overlap, and **workers**.  
    - **Workers ≥ number of GPUs** loads one full model replica per GPU (data parallel).  
    - Output per video: **`<stem>_<12-char-hash>.pkl`** in a **flat** output folder (hash avoids basename collisions across subfolders).  
