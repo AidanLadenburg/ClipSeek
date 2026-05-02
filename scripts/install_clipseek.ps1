@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [switch]$DryRun
+    [switch]$DryRun,
+    [switch]$SkipAdobeDebugMode
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,6 +13,7 @@ $PythonWingetId = "Python.Python.3.12"
 $FallbackPythonVersion = "3.12.10"
 $FallbackPythonInstallerUrl = "https://www.python.org/ftp/python/$FallbackPythonVersion/python-$FallbackPythonVersion-amd64.exe"
 $FallbackPythonInstallerPath = Join-Path $env:TEMP "clipseek_python-$FallbackPythonVersion-amd64.exe"
+$DefaultCsxsVersions = @("9", "10", "11", "12")
 
 function Write-Step {
     param([string]$Message)
@@ -86,12 +88,39 @@ function Test-PythonCandidate {
 
 function Test-SupportedPython {
     param([object]$PythonInfo)
+    if ($null -eq $PythonInfo) {
+        return $false
+    }
+    $props = $PythonInfo.PSObject.Properties.Name
+    foreach ($name in @("Major", "Minor", "Bits")) {
+        if ($props -notcontains $name) {
+            return $false
+        }
+    }
     return (
-        $null -ne $PythonInfo -and
         $PythonInfo.Major -eq 3 -and
         $PythonInfo.Minor -ge 10 -and
         $PythonInfo.Bits -eq 64
     )
+}
+
+function Select-SupportedPython {
+    param([object]$Candidate)
+    if ($null -eq $Candidate) {
+        return $null
+    }
+    if ($Candidate -is [array]) {
+        foreach ($item in $Candidate) {
+            if (Test-SupportedPython -PythonInfo $item) {
+                return $item
+            }
+        }
+        return $null
+    }
+    if (Test-SupportedPython -PythonInfo $Candidate) {
+        return $Candidate
+    }
+    return $null
 }
 
 function Find-Python {
@@ -202,7 +231,7 @@ function Install-Python {
     if ($null -ne $winget) {
         try {
             Write-Host "Trying winget package: $PythonWingetId"
-            Invoke-Checked -Exe $winget.Source -ArgList @(
+            $null = Invoke-Checked -Exe $winget.Source -ArgList @(
                 "install",
                 "--id", $PythonWingetId,
                 "--exact",
@@ -213,8 +242,8 @@ function Install-Python {
                 "--accept-source-agreements"
             )
             Update-ProcessPath
-            $python = Find-Python
-            if (Test-SupportedPython -PythonInfo $python) {
+            $python = Select-SupportedPython -Candidate (Find-Python)
+            if ($null -ne $python) {
                 return $python
             }
             Write-Host "winget completed, but Python was not detected. Falling back to the official installer."
@@ -230,10 +259,10 @@ function Install-Python {
     Write-Host "To: $FallbackPythonInstallerPath"
     if (-not $DryRun) {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest -UseBasicParsing -Uri $FallbackPythonInstallerUrl -OutFile $FallbackPythonInstallerPath
+        $null = Invoke-WebRequest -UseBasicParsing -Uri $FallbackPythonInstallerUrl -OutFile $FallbackPythonInstallerPath
     }
 
-    Invoke-Checked `
+    $null = Invoke-Checked `
         -Exe $FallbackPythonInstallerPath `
         -ArgList @(
             "/quiet",
@@ -248,8 +277,8 @@ function Install-Python {
         -ValidExitCodes @(0, 3010)
 
     Update-ProcessPath
-    $installed = Find-Python
-    if (Test-SupportedPython -PythonInfo $installed) {
+    $installed = Select-SupportedPython -Candidate (Find-Python)
+    if ($null -ne $installed) {
         return $installed
     }
 
@@ -265,6 +294,49 @@ function Install-Python {
     }
 
     throw "Python install finished, but a supported 64-bit Python 3.10+ could not be found. Restart Windows and run this installer again."
+}
+
+function Set-AdobeCepDebugMode {
+    Write-Step "Enabling Adobe CEP panel debug mode"
+    Write-Host "Setting current-user registry values so unsigned CEP panels can load."
+
+    $adobeRoot = "HKCU:\Software\Adobe"
+    $versions = New-Object System.Collections.Generic.List[string]
+    foreach ($v in $DefaultCsxsVersions) {
+        $versions.Add($v)
+    }
+
+    if (Test-Path $adobeRoot) {
+        Get-ChildItem -Path $adobeRoot -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                if ($_.PSChildName -match '^CSXS\.(\d+)$') {
+                    if (-not $versions.Contains($Matches[1])) {
+                        $versions.Add($Matches[1])
+                    }
+                }
+            }
+    }
+
+    $orderedVersions = $versions | Sort-Object { [int]$_ } -Unique
+    foreach ($v in $orderedVersions) {
+        $key = Join-Path $adobeRoot "CSXS.$v"
+        Write-Host "HKCU\Software\Adobe\CSXS.$v\PlayerDebugMode = 1"
+        if ($DryRun) {
+            continue
+        }
+        if (-not (Test-Path $adobeRoot)) {
+            New-Item -Path $adobeRoot -Force | Out-Null
+        }
+        if (-not (Test-Path $key)) {
+            New-Item -Path $key -Force | Out-Null
+        }
+        New-ItemProperty `
+            -Path $key `
+            -Name "PlayerDebugMode" `
+            -Value "1" `
+            -PropertyType String `
+            -Force | Out-Null
+    }
 }
 
 function Get-PytorchWheelIndex {
@@ -321,11 +393,20 @@ try {
     Write-Host "ClipSeek dependency installer" -ForegroundColor White
     Write-Host "Repo: $RepoRoot"
 
-    $python = Find-Python
-    if (-not (Test-SupportedPython -PythonInfo $python)) {
-        $python = Install-Python
+    $python = Select-SupportedPython -Candidate (Find-Python)
+    if ($null -eq $python) {
+        $python = Select-SupportedPython -Candidate (Install-Python)
+    }
+    if ($null -eq $python) {
+        throw "ClipSeek requires 64-bit Python 3.10 or newer, but no supported Python was found or installed."
     }
     Write-Host "Python: $($python.ResolvedExe) ($($python.Major).$($python.Minor), $($python.Bits)-bit)"
+
+    if (-not $SkipAdobeDebugMode) {
+        Set-AdobeCepDebugMode
+    } else {
+        Write-Host "Skipping Adobe CEP debug-mode registry setup."
+    }
 
     Write-Step "Upgrading pip"
     Invoke-Checked -Exe $python.Exe -ArgList ($python.PrefixArgs + @("-m", "pip", "install", "--user", "--upgrade", "pip", "setuptools", "wheel"))
