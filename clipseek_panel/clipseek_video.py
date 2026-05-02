@@ -35,18 +35,26 @@ class ClipseekVideo:
 
 
 class _ClipseekUnpickler(pickle.Unpickler):
-    """Map legacy `__main__.video_obj` (and similar) to ClipseekVideo."""
+    """Map legacy ClipSeek classes and NumPy 2 private pickle paths."""
 
     def find_class(self, module, name):
         if name in ("video_obj", "ClipseekVideo"):
             return ClipseekVideo
+        if module == "numpy._core":
+            module = "numpy.core"
+        elif module.startswith("numpy._core."):
+            module = "numpy.core." + module[len("numpy._core.") :]
         return super().find_class(module, name)
+
+
+def load_pickle_compat(file_obj):
+    try:
+        return pickle.load(file_obj)
+    except (AttributeError, ModuleNotFoundError, pickle.UnpicklingError):
+        file_obj.seek(0)
+        return _ClipseekUnpickler(file_obj).load()
 
 
 def load_clipseek_video_pickle(file_path):
     with open(file_path, "rb") as f:
-        try:
-            return pickle.load(f)
-        except (AttributeError, ModuleNotFoundError, pickle.UnpicklingError):
-            f.seek(0)
-            return _ClipseekUnpickler(f).load()
+        return load_pickle_compat(f)

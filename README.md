@@ -18,7 +18,7 @@ The embedder and the panel are separate: you run embedding when needed; editors 
    - Windows: double-click **`install_clipseek.bat`** from the repo root.
    - The installer uses an existing 64-bit Python 3.10+ when available. If none is found, it installs 64-bit Python 3.12 for the current Windows user, then installs ClipSeek packages into that Python's local user site-packages with `pip --user`.
    - It does not create a virtual environment. If it installs Python, Python is added to the current user's PATH, which is the normal Python installer behavior.
-   - It installs PyTorch from the correct CPU/CUDA wheel index before installing the remaining ClipSeek dependencies.
+   - It installs PyTorch from the correct CPU/CUDA wheel index before installing the remaining ClipSeek dependencies. ClipSeek uses NumPy 2.x so embedding pickle files can be loaded by both the embedder and search panel.
    - It also enables Adobe CEP debug mode for the current user by setting `PlayerDebugMode=1` under `HKCU\Software\Adobe\CSXS.9` through `CSXS.12` and any existing `CSXS.*` keys. This is required for unsigned development panels. To skip this, run `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\install_clipseek.ps1 -SkipAdobeDebugMode`.
 
 1. **Model weights**

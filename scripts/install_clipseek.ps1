@@ -421,6 +421,12 @@ try {
         "--index-url", $torchIndex.Index
     ))
 
+    Write-Step "Installing NumPy 2"
+    Invoke-Checked -Exe $python.Exe -ArgList ($python.PrefixArgs + @(
+        "-m", "pip", "install", "--user", "--upgrade", "--force-reinstall", "--prefer-binary",
+        "numpy>=2.0,<3"
+    ))
+
     Write-Step "Installing ClipSeek Python dependencies"
     Invoke-Checked -Exe $python.Exe -ArgList ($python.PrefixArgs + @(
         "-m", "pip", "install", "--user", "--upgrade", "--prefer-binary",
@@ -447,6 +453,12 @@ packages = [
 for display, module in packages:
     importlib.import_module(module)
     print(f"ok: {display}")
+
+import numpy
+import numpy._core.numeric
+if int(numpy.__version__.split(".")[0]) < 2:
+    raise RuntimeError(f"ClipSeek requires NumPy 2.x for embedding pickle compatibility; found {numpy.__version__}")
+print(f"numpy: {numpy.__version__}")
 
 import torch
 print(f"torch: {torch.__version__}")

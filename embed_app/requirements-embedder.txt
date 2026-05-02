@@ -4,7 +4,7 @@
 # installs into the user's active Python environment with pip --user.
 torch>=2.4,<3
 torchvision>=0.19,<1
-numpy>=1.26.4,<2.0
+numpy>=2.0,<3
 decord==0.6.0
 transformers>=4.46,<5
 einops>=0.7,<1

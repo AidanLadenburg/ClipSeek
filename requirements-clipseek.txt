@@ -4,8 +4,10 @@
 # index, then applies this file to the user's Python site-packages. Keep torch
 # out of this file so the second pip pass does not replace a CUDA build.
 
-# decord 0.6.0 is the available Windows wheel and was built before NumPy 2.
-numpy>=1.26.4,<2.0
+# Embedding pickle files created with NumPy 2 reference numpy._core.* modules.
+# NumPy 1.x cannot unpickle those files and fails with:
+# "No module named 'numpy._core.numeric'".
+numpy>=2.0,<3
 decord==0.6.0
 
 # Cosmos-Embed1 model/processor dependencies.
