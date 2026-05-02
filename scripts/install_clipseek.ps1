@@ -33,6 +33,23 @@ function Invoke-Checked {
     }
 }
 
+function Invoke-PythonScript {
+    param(
+        [object]$PythonInfo,
+        [string]$ScriptText,
+        [string]$Name
+    )
+
+    $safeName = $Name -replace '[^A-Za-z0-9_-]', '_'
+    $scriptPath = Join-Path $env:TEMP "clipseek_${safeName}_$PID.py"
+    try {
+        Set-Content -LiteralPath $scriptPath -Value $ScriptText -Encoding UTF8
+        Invoke-Checked -Exe $PythonInfo.Exe -ArgList ($PythonInfo.PrefixArgs + @($scriptPath))
+    } finally {
+        Remove-Item -LiteralPath $scriptPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Test-PythonCandidate {
     param(
         [string]$Exe,
@@ -250,7 +267,7 @@ print(f"cuda available: {torch.cuda.is_available()}")
 if torch.cuda.is_available():
     print(f"cuda device: {torch.cuda.get_device_name(0)}")
 "@
-    Invoke-Checked -Exe $python.Exe -ArgList ($python.PrefixArgs + @("-c", $verify))
+    Invoke-PythonScript -PythonInfo $python -ScriptText $verify -Name "verify"
 
     Write-Step "Done"
     Write-Host "Installed ClipSeek libraries into this Python's user site-packages:"
