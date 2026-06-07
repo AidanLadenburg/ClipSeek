@@ -82,6 +82,10 @@
             </div>
 
             <div class="field">
+                <button type="button" id="refreshCacheBtn" class="btn btn--secondary">Refresh cache</button>
+            </div>
+
+            <div class="field">
                 <span class="field-label">Search mode</span>
                 <p class="field-hint">Exact runs full batched similarity over every chunk. FAISS uses approximate nearest neighbors to pick candidate videos, then reranks with the same exact scores on those candidates (faster at very large scale; install <code>faiss-cpu</code>).</p>
                 <div class="toggle-row">

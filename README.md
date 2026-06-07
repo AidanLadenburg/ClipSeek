@@ -6,9 +6,9 @@ Semantic video search for Adobe Premiere Pro: embed your library with **Cosmos-E
 
 | Piece | Role |
 |--------|------|
-| **`embed_app/`** | Standalone embedder GUI (`embed_app.py`). Walks a video folder recursively, writes **one `.pkl` per video** into the output folder, maintains **`processed_files.csv`**, and builds a **mmap corpus cache** (`cached_embeddings.matrix.npy` + `cached_embeddings.meta`) so the Premiere search backend can load quickly. |
+| **`embed_app/`** | Standalone embedder GUI (`embed_app.py`). Walks a video folder recursively, writes **one `.pkl` per video** into the output folder, maintains **`processed_files.csv`**, and builds an appendable corpus cache (`cached_embeddings.matrix*.bin` + `cached_embeddings.manifest`) so the Premiere search backend can load quickly. |
 | **`extension/`** | CEP panel (`index.html`, `js/`, `jsx/`, `lib/`, `CSXS/`). Spawns **`io.exe`** (or `python io.py`) and sends JSON search commands over stdin. Includes **`io.py`** and copies of shared Python modules so the panel is self-contained when copied into Premiere’s extensions directory. |
-| **`extension/io.py`** | Loads Cosmos-Embed1, loads embeddings from the mmap cache (or per-video `.pkl` files), runs similarity search, prints JSON on stdout. Supports **exact batched** search and optional **FAISS** approximate candidates + exact rerank (see Settings in the panel). |
+| **`extension/io.py`** | Loads Cosmos-Embed1, loads embeddings from the append cache (or legacy/per-video fallback files), runs similarity search, prints JSON on stdout. Supports **exact batched** search and optional **FAISS** approximate candidates + exact rerank (see Settings in the panel). |
 
 The embedder and the panel are separate: you run embedding when needed; editors only need Premiere and the search backend.
 
@@ -32,11 +32,11 @@ The embedder and the panel are separate: you run embedding when needed; editors 
    - Set **input** folder, **output** (embedding) folder, chunk size (default 10s), overlap, and **workers**.  
    - **Workers ≥ number of GPUs** loads one full model replica per GPU (data parallel).  
    - Output per video: **`<stem>_<12-char-hash>.pkl`** in a **flat** output folder (hash avoids basename collisions across subfolders).  
-   - The app **updates the mmap corpus cache** while embedding (and on stop/finish). Use **Regenerate mmap cache** if you need to rebuild it manually.
+   - The app **updates the append corpus cache** while embedding (and on stop/finish). Use **Regenerate append cache** if you need to rebuild it manually.
 
 3. **Premiere panel**  
    - Copy the entire **`extension/`** folder into your CEP extensions directory (keep `index.html`, `js/`, `css/`, `lib/`, `jsx/`, `CSXS/`, and Python files beside `index.html` if you use `io.py`).  
-   - In settings, set **Embedding folder** to the embedder output folder (contains per-video `.pkl` files and the mmap cache).  
+   - In settings, set **Embedding folder** to the embedder output folder (contains per-video `.pkl` files and the append cache).
    - **Production:** place **`io.exe`** under **`extension/python/io.exe`** (see `extension/js/bridge.js`).  
    - **Dev:** omit `io.exe`; the panel runs **`extension/io.py`**. Set **`CLIPSEEK_PYTHON`** if `python` is not on PATH.  
    - Search deps: `pip install -r extension/requirements-search.txt` (includes **`faiss-cpu`** for optional approximate search).
@@ -45,9 +45,9 @@ The embedder and the panel are separate: you run embedding when needed; editors 
    - Type a query (Enter) or use upload / drag-and-drop for image or video similarity.  
    - **Settings → Search mode:** **Exact** = full batched similarity over all chunks (accurate). **FAISS** = approximate nearest-neighbor probe to pick candidate videos, then **exact** scores on those candidates (faster on very large libraries). Annotation-assisted text queries always use the exact path.
 
-## Corpus cache (mmap)
+## Corpus cache
 
-The search backend prefers **`cached_embeddings.matrix.npy`** + **`cached_embeddings.meta`** (float32 matrix + manifest). Startup mmap-loads this instead of unpickling a huge monolithic file. The embedder writes/updates this format; use **Regenerate mmap cache** in the embedder UI if the index is stale or corrupted.
+The search backend prefers **`cached_embeddings.matrix*.bin`** + **`cached_embeddings.manifest`** (raw float32 rows + manifest). The embedder appends new rows to the matrix and atomically publishes a new manifest generation; Premiere only reads the cache. Use **Refresh cache** in the panel Settings when a search reports new embeddings are available, or **Regenerate append cache** in the embedder UI if the index is stale or corrupted.
 
 ## Building `io.exe` (PyInstaller)
 
@@ -78,7 +78,7 @@ ClipSeek/
   README.md
   embed_app/
     embed_app.py
-    embeddings_cache.py       # mmap cache during / after embedding
+    embeddings_cache.py       # append cache during / after embedding
     embed_cache_v2.py
     download.py
     clipseek_video.py
@@ -98,7 +98,7 @@ ClipSeek/
 
 ## What to commit
 
-**`.gitignore`** excludes large or generated assets: **`cosmos_model/`**, **`*.pkl`**, **mmap cache files** (`cached_embeddings.matrix.npy`, `cached_embeddings.meta`), **logs**, **`node_modules`**, **`extension/python/io.exe`**, and common weight extensions. Run **`git status`** before pushing; do not commit downloaded model trees or customer embedding folders.
+**`.gitignore`** excludes large or generated assets: **`cosmos_model/`**, **`*.pkl`**, cache files (`cached_embeddings.matrix*.bin`, `cached_embeddings.manifest`, plus legacy v2 cache files), **logs**, **`node_modules`**, **`extension/python/io.exe`**, and common weight extensions. Run **`git status`** before pushing; do not commit downloaded model trees or customer embedding folders.
 
 ## License / third party
 

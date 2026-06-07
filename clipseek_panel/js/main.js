@@ -155,7 +155,11 @@
 
     const phase = String(payload.phase || '');
     const isError = payload.level === 'error' || phase.endsWith('_error');
-    const isDone = phase === 'search_done' || phase === 'embeddings_reloaded' || phase === 'embeddings_cleared';
+    const isDone =
+      phase === 'search_done' ||
+      phase === 'embeddings_reloaded' ||
+      phase === 'embeddings_cleared' ||
+      phase === 'embeddings_refresh';
 
     el.textContent = payload.message;
     el.classList.toggle('is-error', !!isError);
@@ -329,6 +333,28 @@
 
     document.getElementById('videoFolderSelectBtn').addEventListener('click', () => openFolderDialog('video'));
     document.getElementById('embeddingFolderSelectBtn').addEventListener('click', () => openFolderDialog('embedding'));
+    document.getElementById('refreshCacheBtn').addEventListener('click', () => {
+      setSearchStatus({
+        phase: 'embeddings_refresh',
+        message: 'ClipSeek: Checking cache manifest...',
+      });
+      ensureBridgeReady()
+        .then(() => {
+          bridge.sendJson({
+            command: 'refresh_embeddings',
+            embedding_folder: selectedFolders.embeddingFolder,
+            video_folder: selectedFolders.videoFolder,
+          });
+        })
+        .catch((err) => {
+          console.error(err);
+          setSearchStatus({
+            phase: 'embeddings_error',
+            level: 'error',
+            message: 'ClipSeek: Could not start backend to refresh cache.',
+          });
+        });
+    });
 
     async function handleSearchKeyPress(event) {
       if (event.key !== 'Enter' || !event.target.value.trim()) return;

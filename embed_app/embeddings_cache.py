@@ -1,6 +1,5 @@
 """
-Build and maintain mmap corpus cache (cached_embeddings.matrix.npy + cached_embeddings.meta)
-for extension/io.PersistentSearch.load_objs.
+Build and maintain the append corpus cache for clipseek_panel/io.PersistentSearch.load_objs.
 """
 from __future__ import annotations
 
@@ -17,38 +16,29 @@ import torch
 from clipseek_video import load_clipseek_video_pickle
 from embed_cache_v2 import (
     _bundle_mtime,
+    append_v3_objects,
+    load_v3_objects,
     load_v2_objects,
-    save_v2_from_objects,
+    MANIFEST_V3_NAME,
+    manifest_path_key,
+    read_v3_manifest_summary,
+    v3_bundle_exists,
     v2_bundle_exists,
+    write_v3_from_objects,
 )
 
 # Old monolithic cache filename — excluded from per-video scans; removed on explicit regenerate.
 LEGACY_MONOLITHIC_PKL = "cached_embeddings.pkl"
 
-# Tune: balance freshness vs I/O when embedding huge libraries. Each save rewrites
-# the full mmap matrix, so frequent saves can dominate embedding time.
+# Tune: balance freshness vs I/O when embedding huge libraries. Saves append
+# dirty videos and publish a new manifest generation.
 CACHE_SAVE_EVERY_N_VIDEOS = 500
 CACHE_SAVE_MIN_INTERVAL_SEC = 1200
 
 
 # Match extension/io.py — used as dict keys when merging.
 def merge_path_key(path: str) -> str:
-    working = path.replace("\\\\", "\\")
-    working = working.replace("//", "/")
-    working = working.replace("\\ ", "\\")
-    working = working.replace("/ ", "/")
-    working = working.replace("\\", "/")
-    if os.path.exists(working):
-        return working
-    if os.path.exists(working.replace(".mp4", ".mov.mp4")):
-        return working.replace(".mp4", ".mov.mp4")
-    if os.path.exists(working.replace(".mp4", ".mp4.mp4")):
-        return working.replace(".mp4", ".mp4.mp4")
-    if os.path.exists(working.replace(".mp4", ".wav.mp4")):
-        return working.replace(".mp4", ".wav.mp4")
-    if os.path.exists(working.replace(".mp4", ".mp3.mp4")):
-        return working.replace(".mp4", ".mp3.mp4")
-    return path
+    return manifest_path_key(path)
 
 
 def _count_per_video_pkls(embeddings_path: str) -> int:
@@ -124,8 +114,8 @@ def rebuild_merged_list_from_disk(
 
 
 def atomic_write_cache(embeddings_path: str, merged: List[Any]) -> None:
-    """Write mmap matrix + meta."""
-    save_v2_from_objects(merged, embeddings_path)
+    """Write a complete v3 append-cache generation."""
+    write_v3_from_objects(merged, embeddings_path)
 
 
 def regenerate_mmap_cache(
@@ -134,7 +124,7 @@ def regenerate_mmap_cache(
     progress: Optional[Callable[[float, str], None]] = None,
 ) -> int:
     """
-    Rebuild mmap cache from all per-video .pkl files in ``embeddings_path``.
+    Rebuild append cache from all per-video .pkl files in ``embeddings_path``.
     Removes legacy ``cached_embeddings.pkl`` if present. Returns number of videos indexed.
 
     If ``progress`` is set, it is called periodically with ``(fraction_0_to_1, message)``.
@@ -158,8 +148,8 @@ def regenerate_mmap_cache(
         embeddings_path, on_load_progress=_load_progress
     )
     if merged:
-        _report(0.9, "Writing mmap cache to disk…")
-        save_v2_from_objects(merged, embeddings_path)
+        _report(0.9, "Writing append cache to disk...")
+        write_v3_from_objects(merged, embeddings_path)
         _report(1.0, "Finished.")
     else:
         _report(1.0, "No videos to index (folder empty or no valid .pkl files).")
@@ -185,68 +175,90 @@ class EmbeddingIndexCache:
         self._by_path: Dict[str, Any] = {}
         self._last_save_time = 0.0
         self._videos_since_save = 0
+        self._dirty_keys = set()
 
     def _replace_index_from_mmap(self) -> None:
         """Reload in-memory index from mmap files (after a successful write)."""
-        if not v2_bundle_exists(self.embeddings_path):
+        if v3_bundle_exists(self.embeddings_path):
+            objs = load_v3_objects(self.embeddings_path)
+        elif v2_bundle_exists(self.embeddings_path):
+            objs = load_v2_objects(self.embeddings_path)
+        else:
             return
-        objs = load_v2_objects(self.embeddings_path)
         self._by_path = {merge_path_key(getattr(o, "path", "")): o for o in objs}
-
-    def _merge_mmap_reload_with_concurrent_adds(self, saved_keys: frozenset) -> None:
-        """
-        Reload mmap-backed rows from disk after save, but keep paths that were not part
-        of that save snapshot (e.g. a video finished while the mmap file was being written).
-        """
-        if not v2_bundle_exists(self.embeddings_path):
-            return
-        objs = load_v2_objects(self.embeddings_path)
-        fresh = {merge_path_key(getattr(o, "path", "")): o for o in objs}
-        for k, o in self._by_path.items():
-            if k not in saved_keys:
-                fresh[k] = o
-        self._by_path = fresh
 
     def _rebuild_index_from_disk(self) -> None:
         n_disk = _count_per_video_pkls(self.embeddings_path)
         if n_disk == 0:
             self._by_path = {}
-            logging.info("No per-video embeddings in folder; mmap cache empty.")
+            logging.info("No per-video embeddings in folder; append cache empty.")
             self._last_save_time = time.monotonic()
             self._videos_since_save = 0
+            self._dirty_keys = set()
             return
-        logging.info("Building mmap cache from %d per-video .pkl file(s).", n_disk)
+        logging.info("Building append cache from %d per-video .pkl file(s).", n_disk)
         merged = rebuild_merged_list_from_disk(self.embeddings_path)
         self._by_path = {merge_path_key(getattr(o, "path", "")): o for o in merged}
         if merged:
             try:
                 atomic_write_cache(self.embeddings_path, merged)
-                logging.info("Wrote mmap cache (%d videos).", len(merged))
+                logging.info("Wrote append cache (%d videos).", len(merged))
                 try:
                     self._replace_index_from_mmap()
                 except Exception as e:
-                    logging.warning("Could not mmap-reload after rebuild save: %s", e)
+                    logging.warning("Could not reload after rebuild save: %s", e)
             except Exception as e:
-                logging.error("Could not write mmap cache: %s", e)
+                logging.error("Could not write append cache: %s", e)
         self._last_save_time = time.monotonic()
         self._videos_since_save = 0
+        self._dirty_keys = set()
 
     def initialize(self) -> None:
         """
-        Load mmap cache when available and only fall back to a full rebuild
+        Load append cache when available and only fall back to a full rebuild
         when the bundle is missing or unreadable.
 
         Strategy:
-          1. If the v2 bundle exists, mmap-load it as the base index.
+          1. If the v3 manifest exists, mmap-load it as the base index.
           2. Incrementally load any per-video ``.pkl`` files whose mtime is
-             newer than the bundle and merge them in (covers partial runs).
-          3. A full rebuild only happens when no usable bundle exists.
-
-        This avoids the full-rebuild-every-run problem when the disk file
-        count doesn't match the manifest (e.g. when ``merge_path_key``
-        collapses multiple ``.pkl`` paths into one bundle entry).
+             newer than the manifest and merge them in (covers partial runs).
+          3. If only the legacy v2 bundle exists, convert it once to v3.
+          4. A full rebuild only happens when no usable bundle exists.
         """
         n_disk = _count_per_video_pkls(self.embeddings_path)
+
+        if v3_bundle_exists(self.embeddings_path):
+            try:
+                objs = load_v3_objects(self.embeddings_path)
+                self._by_path = {
+                    merge_path_key(getattr(o, "path", "")): o for o in objs
+                }
+                manifest_ts = os.path.getmtime(
+                    os.path.join(self.embeddings_path, MANIFEST_V3_NAME)
+                )
+                summary = read_v3_manifest_summary(self.embeddings_path) or {}
+                logging.info(
+                    "Using append cache generation %s (%d entries; %d per-video .pkl files on disk).",
+                    summary.get("generation", "?"),
+                    len(self._by_path),
+                    n_disk,
+                )
+
+                added = self._merge_newer_pkls_into_index(manifest_ts)
+                if added:
+                    logging.info(
+                        "Merged %d per-video .pkl(s) newer than the append cache.",
+                        added,
+                    )
+
+                self._last_save_time = time.monotonic()
+                self._videos_since_save = added
+                return
+            except Exception as e:
+                logging.warning(
+                    "Append cache unreadable (%s); trying legacy cache or per-video .pkls.",
+                    e,
+                )
 
         if v2_bundle_exists(self.embeddings_path):
             try:
@@ -256,7 +268,7 @@ class EmbeddingIndexCache:
                 }
                 bundle_ts = _bundle_mtime(self.embeddings_path)
                 logging.info(
-                    "Using mmap cache (%d entries; %d per-video .pkl files on disk).",
+                    "Converting legacy mmap cache (%d entries; %d per-video .pkl files on disk).",
                     len(self._by_path),
                     n_disk,
                 )
@@ -268,10 +280,11 @@ class EmbeddingIndexCache:
                         added,
                     )
 
+                write_v3_from_objects(list(self._by_path.values()), self.embeddings_path)
+                self._replace_index_from_mmap()
                 self._last_save_time = time.monotonic()
-                # Anything newer than the bundle counts as unsaved work so
-                # the next periodic/final save persists those merged rows.
-                self._videos_since_save = added
+                self._videos_since_save = 0
+                self._dirty_keys = set()
                 return
             except Exception as e:
                 logging.warning(
@@ -309,12 +322,16 @@ class EmbeddingIndexCache:
             loaded = list(filter(None, executor.map(_load_one_pkl, newer)))
 
         for o in loaded:
-            self._by_path[merge_path_key(getattr(o, "path", ""))] = o
+            key = merge_path_key(getattr(o, "path", ""))
+            self._by_path[key] = o
+            self._dirty_keys.add(key)
         return len(loaded)
 
     def record_completed_video(self, vid_obj: Any) -> None:
         with self._lock:
-            self._by_path[merge_path_key(getattr(vid_obj, "path", ""))] = vid_obj
+            key = merge_path_key(getattr(vid_obj, "path", ""))
+            self._by_path[key] = vid_obj
+            self._dirty_keys.add(key)
             self._videos_since_save += 1
 
     def maybe_periodic_save(
@@ -325,38 +342,38 @@ class EmbeddingIndexCache:
     ) -> bool:
         """Write cache if thresholds met or force. Returns True if wrote."""
         with self._lock:
-            n = self._videos_since_save
+            n = len(self._dirty_keys)
             elapsed = time.monotonic() - self._last_save_time
             should = force or (n >= every_n_videos) or (elapsed >= min_interval_sec and n > 0)
             if not should:
                 return False
-            merged = list(self._by_path.values())
-            saved_keys = frozenset(
-                merge_path_key(getattr(o, "path", "")) for o in merged
-            )
-            self._videos_since_save = 0
-            self._last_save_time = time.monotonic()
+            dirty_keys = frozenset(self._dirty_keys)
+            dirty_objects = [
+                self._by_path[k] for k in dirty_keys if k in self._by_path
+            ]
 
-        try:
-            atomic_write_cache(self.embeddings_path, merged)
-            with self._lock:
+            try:
+                append_v3_objects(dirty_objects, self.embeddings_path)
+                self._dirty_keys.difference_update(dirty_keys)
+                self._videos_since_save = len(self._dirty_keys)
+                self._last_save_time = time.monotonic()
                 try:
-                    self._merge_mmap_reload_with_concurrent_adds(saved_keys)
+                    self._replace_index_from_mmap()
                 except Exception as e:
-                    logging.warning("Could not refresh mmap index after periodic save: %s", e)
-            logging.info(
-                "Updated mmap cache (%d videos, periodic/forced=%s).",
-                len(merged),
-                force,
-            )
-            return True
-        except Exception as e:
-            logging.error("Failed to update mmap cache: %s", e)
-            return False
+                    logging.warning("Could not refresh cache index after save: %s", e)
+                logging.info(
+                    "Updated append cache (%d dirty videos, periodic/forced=%s).",
+                    len(dirty_objects),
+                    force,
+                )
+                return True
+            except Exception as e:
+                logging.error("Failed to update append cache: %s", e)
+                return False
 
     def final_save(self) -> None:
         with self._lock:
-            if self._videos_since_save <= 0:
-                logging.info("Mmap cache already current; skipping final save.")
+            if not self._dirty_keys:
+                logging.info("Append cache already current; skipping final save.")
                 return
         self.maybe_periodic_save(1, 0.0, force=True)

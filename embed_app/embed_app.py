@@ -321,7 +321,9 @@ class VideoEmbedder:
                     flush_pending()
             except Exception as e:
                 logging.error(f"Error chunk {i} in {os.path.basename(video_path)}: {e}")
-                continue
+                raise RuntimeError(
+                    f"Decoder failed on chunk {i}; skipping video to avoid reusing a failed Decord reader: {e}"
+                ) from e
 
         flush_pending()
 
@@ -526,10 +528,17 @@ class VideoEmbedder:
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = [executor.submit(self.process_single_video, task) for task in tasks]
-                concurrent.futures.wait(futures)
+                for future in concurrent.futures.as_completed(futures):
+                    try:
+                        future.result()
+                    except Exception as e:
+                        logging.exception("Unhandled worker failure: %s", e)
         finally:
             if self._embedding_index_cache is not None:
-                self._embedding_index_cache.final_save()
+                try:
+                    self._embedding_index_cache.final_save()
+                except Exception as e:
+                    logging.exception("Final append cache save failed: %s", e)
                 self._embedding_index_cache = None
 
         if self.stop_event.is_set():
@@ -627,7 +636,7 @@ class App:
         cache_btn_frame.pack(pady=(0, 8))
         self.regenerate_cache_btn = tk.Button(
             cache_btn_frame,
-            text="Regenerate mmap cache",
+            text="Regenerate append cache",
             command=self.regenerate_cache_clicked,
             bg="#e8f4fc",
             height=2,
@@ -819,8 +828,8 @@ class App:
             messagebox.showerror("Error", "Output folder does not exist.")
             return
         if not messagebox.askyesno(
-            "Regenerate mmap cache",
-            "Rebuild cached_embeddings.matrix.npy and cached_embeddings.meta from all "
+            "Regenerate append cache",
+            "Rebuild cached_embeddings.manifest and the append matrix from all "
             "per-video .pkl files in the output folder?\n\n"
             "This can take a long time for very large libraries. "
             "Legacy cached_embeddings.pkl will be removed if present.",
@@ -829,7 +838,7 @@ class App:
         self.regenerate_cache_btn.config(state=tk.DISABLED)
         self.start_btn.config(state=tk.DISABLED)
         self._cache_regen_ui_show()
-        self.update_status("Regenerating mmap cache from per-video .pkl files...")
+        self.update_status("Regenerating append cache from per-video .pkl files...")
         t = threading.Thread(target=self._run_regenerate_cache, args=(output_dir,), daemon=True)
         t.start()
 
@@ -856,7 +865,7 @@ class App:
             n = regenerate_mmap_cache(output_dir, progress=on_progress)
             self.root.after(0, lambda n=n: self._regenerate_done(None, n))
         except Exception as e:
-            logging.exception("Regenerate mmap cache failed")
+            logging.exception("Regenerate append cache failed")
             self.root.after(0, lambda e=e: self._regenerate_done(e, 0))
 
     def _regenerate_done(self, err, count):
@@ -867,8 +876,8 @@ class App:
             messagebox.showerror("Regenerate cache failed", str(err))
             self.update_status("Regenerate cache failed.")
         else:
-            messagebox.showinfo("Done", f"Mmap cache rebuilt ({count} videos).")
-            self.update_status(f"Mmap cache rebuilt ({count} videos).")
+            messagebox.showinfo("Done", f"Append cache rebuilt ({count} videos).")
+            self.update_status(f"Append cache rebuilt ({count} videos).")
 
     def start_thread(self):
         input_dir = self.input_entry.get()
@@ -918,20 +927,30 @@ class App:
     def run_process(
         self, input_dir, output_dir, chunk_size, overlap, workers, skip_failed=False
     ):
-        self.embedder.process_folder(
-            input_dir,
-            output_dir,
-            chunk_size,
-            overlap,
-            max_workers=workers,
-            skip_failed=skip_failed,
-        )
+        error_text = None
+        try:
+            self.embedder.process_folder(
+                input_dir,
+                output_dir,
+                chunk_size,
+                overlap,
+                max_workers=workers,
+                skip_failed=skip_failed,
+            )
+        except Exception as e:
+            logging.exception("Processing failed")
+            error_text = str(e)
         
         self.root.after(0, lambda: self.start_btn.config(state=tk.NORMAL))
         self.root.after(0, lambda: self.stop_btn.config(state=tk.DISABLED))
         self.root.after(0, lambda: self.regenerate_cache_btn.config(state=tk.NORMAL))
-        if not self.embedder.stop_event.is_set():
-            messagebox.showinfo("Success", "Processing Finished!")
+        if error_text:
+            self.root.after(
+                0,
+                lambda msg=error_text: messagebox.showerror("Processing failed", msg),
+            )
+        elif not self.embedder.stop_event.is_set():
+            self.root.after(0, lambda: messagebox.showinfo("Success", "Processing Finished!"))
 
 if __name__ == "__main__":
     root = tk.Tk()

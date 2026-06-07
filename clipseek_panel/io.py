@@ -27,9 +27,11 @@ EXACT_KERNEL_WARM_ROWS = 1024
 from cosmos_embedder import CosmosEmbedder
 from clipseek_video import load_clipseek_video_pickle
 from embed_cache_v2 import (
+    load_v3_objects,
     load_v2_objects,
     max_per_video_embedding_mtime,
-    save_v2_from_objects,
+    read_v3_manifest_summary,
+    v3_bundle_exists,
     v2_bundle_exists,
     v2_is_current,
 )
@@ -234,6 +236,10 @@ class PersistentSearch:
         self._last_faiss_candidate_count = 0
         self._last_faiss_total_count = 0
         self._path_lookup = {}
+        self._loaded_cache_generation = None
+        self._loaded_cache_video_count = 0
+        self._loaded_cache_format = None
+        self._stale_cache_notified_generation = None
         self._exact_warmup_lock = threading.Lock()
         self._exact_warmup_thread = None
         self._exact_warmup_cancel = threading.Event()
@@ -275,6 +281,7 @@ class PersistentSearch:
         # the previous folder's objects and the panel keeps searching the old library.
         self.cached_objects = None
         self._path_lookup = {}
+        self._set_loaded_cache_state(None)
         self.current_embedding_folder = new_folder
         self.current_video_folder = video_folder
         if not new_folder:
@@ -320,6 +327,115 @@ class PersistentSearch:
             key = normalize_path_key(getattr(obj, "path", ""))
             if key and key not in self._path_lookup:
                 self._path_lookup[key] = obj
+
+    def _set_loaded_cache_state(self, cache_format: str, summary=None):
+        self._loaded_cache_format = cache_format
+        if cache_format == "v3" and summary:
+            self._loaded_cache_generation = int(summary.get("generation", 0))
+            self._loaded_cache_video_count = int(summary.get("video_count", 0))
+            self._stale_cache_notified_generation = None
+        else:
+            self._loaded_cache_generation = None
+            self._loaded_cache_video_count = len(self.cached_objects or [])
+            self._stale_cache_notified_generation = None
+
+    def _cache_stale_event_for_search(self, embeddings_path: str):
+        if not embeddings_path:
+            return None
+        summary = read_v3_manifest_summary(embeddings_path)
+        if not summary:
+            return None
+        disk_generation = int(summary.get("generation", 0))
+        if self._loaded_cache_generation is not None:
+            if disk_generation <= int(self._loaded_cache_generation):
+                return None
+            loaded_count = int(self._loaded_cache_video_count or 0)
+        else:
+            if self.cached_objects is None:
+                return None
+            loaded_count = len(self.cached_objects or [])
+        if self._stale_cache_notified_generation == disk_generation:
+            return None
+        disk_count = int(summary.get("video_count", 0))
+        new_count = max(0, disk_count - loaded_count)
+        suffix = f" ({new_count} new clips)" if new_count else ""
+        return {
+            "phase": "cache_stale",
+            "message": f"ClipSeek: New embeddings are available{suffix}. Use Settings > Refresh cache to include them.",
+            "generation": disk_generation,
+            "videos": disk_count,
+        }
+
+    def _emit_cache_stale_event(self, event) -> None:
+        if not event:
+            return
+        disk_generation = int(event.get("generation", 0))
+        if self._stale_cache_notified_generation == disk_generation:
+            return
+        _clipseek_ui(**event)
+        self._stale_cache_notified_generation = disk_generation
+
+    def refresh_embeddings(self, video_folder, embedding_folder):
+        if not embedding_folder:
+            _clipseek_ui(
+                "embeddings_refresh",
+                "ClipSeek: No embedding folder is selected.",
+                videos=0,
+            )
+            return {"refreshed": False, "reason": "no embedding folder"}
+
+        summary = read_v3_manifest_summary(embedding_folder)
+        if not summary:
+            _clipseek_ui(
+                "embeddings_refresh",
+                "ClipSeek: No append-cache manifest found. Run the Video Embedder to update the cache.",
+            )
+            return {"refreshed": False, "reason": "no v3 manifest"}
+
+        disk_generation = int(summary.get("generation", 0))
+        if (
+            self.cached_objects is not None
+            and embedding_folder == self.current_embedding_folder
+            and self._loaded_cache_generation is not None
+            and disk_generation <= int(self._loaded_cache_generation)
+        ):
+            _clipseek_ui(
+                "embeddings_refresh",
+                "ClipSeek: Cache is already current.",
+                generation=disk_generation,
+                videos=int(summary.get("video_count", 0)),
+            )
+            return {"refreshed": False, "reason": "current"}
+
+        self._clear_faiss_cache()
+        self._cancel_exact_warmup()
+        _clipseek_ui(
+            "cache_loading",
+            "ClipSeek: Refreshing embedding cache...",
+        )
+        try:
+            cached_objects = load_v3_objects(embedding_folder)
+            self._set_cached_objects(cached_objects)
+            self.current_video_folder = video_folder
+            self.current_embedding_folder = embedding_folder
+            self._set_loaded_cache_state("v3", summary)
+            self._start_exact_warmup(embedding_folder, cached_objects)
+        except Exception as e:
+            _clipseek_error(
+                f"ClipSeek: Failed to refresh embedding cache: {e}",
+                exc=e,
+                phase="embeddings_error",
+            )
+            return {"refreshed": False, "error": str(e)}
+
+        n = len(cached_objects)
+        _clipseek_ui(
+            "embeddings_reloaded",
+            f"ClipSeek: Cache refreshed — ready to search ({n} videos).",
+            generation=disk_generation,
+            videos=n,
+        )
+        return {"refreshed": True, "generation": disk_generation, "videos": n}
 
     def _find_video_by_path(self, vid_objs, query_path):
         query_key = normalize_path_key(query_path)
@@ -529,6 +645,7 @@ class PersistentSearch:
 
             t_load0 = time.time()
             vid_objs = self.load_objs(video_folder, embedding_folder)
+            stale_cache_event = self._cache_stale_event_for_search(embedding_folder)
             load_seconds = time.time() - t_load0
 
             if not vid_objs:
@@ -536,6 +653,7 @@ class PersistentSearch:
                     "search_empty",
                     "ClipSeek: No embeddings loaded — choose an embedding folder in Settings.",
                 )
+                self._emit_cache_stale_event(stale_cache_event)
                 return {
                     "results": [],
                     "search_seconds": time.time() - t_wall,
@@ -636,6 +754,7 @@ class PersistentSearch:
                 results=len(out),
                 seconds=total,
             )
+            self._emit_cache_stale_event(stale_cache_event)
             return {
                 "results": out,
                 "search_seconds": total,
@@ -729,6 +848,33 @@ class PersistentSearch:
             print("Using pre-cached objs", flush=True)
             return self.cached_objects
 
+        if v3_bundle_exists(embeddings_path):
+            try:
+                summary = read_v3_manifest_summary(embeddings_path) or {}
+                _clipseek_ui(
+                    "cache_loading",
+                    "ClipSeek: Loading append embedding cache...",
+                )
+                t0 = time.time()
+                cached_objects = load_v3_objects(embeddings_path)
+                dt = time.time() - t0
+                print(
+                    f"Using append cache generation {summary.get('generation', '?')} ({len(cached_objects)} videos) in {dt:.2f}s.",
+                    flush=True,
+                )
+                self._set_cached_objects(cached_objects)
+                self.current_video_folder = video_folder
+                self.current_embedding_folder = embeddings_path
+                self._set_loaded_cache_state("v3", summary)
+                self._start_exact_warmup(embeddings_path, cached_objects)
+                return cached_objects
+            except Exception as e:
+                print(f"Append cache invalid ({e}); trying legacy cache or per-video .pkls.", flush=True)
+                _clipseek_ui(
+                    "cache_loading",
+                    "ClipSeek: Append cache unavailable; trying legacy embeddings...",
+                )
+
         pkl_mtime = max_per_video_embedding_mtime(embeddings_path)
 
         if v2_bundle_exists(embeddings_path) and v2_is_current(embeddings_path, pkl_mtime):
@@ -747,12 +893,13 @@ class PersistentSearch:
                 self._set_cached_objects(cached_objects)
                 self.current_video_folder = video_folder
                 self.current_embedding_folder = embeddings_path
+                self._set_loaded_cache_state("v2")
                 self._start_exact_warmup(embeddings_path, cached_objects)
                 return cached_objects
             except Exception as e:
-                print(f"Mmap cache invalid ({e}); rebuilding from per-video .pkls.", flush=True)
+                print(f"Mmap cache invalid ({e}); loading per-video .pkls read-only.", flush=True)
                 _clipseek_ui(
-                    "cache_rebuild",
+                    "cache_loading",
                     "ClipSeek: Mmap cache unavailable; loading per-video .pkl files instead…",
                 )
 
@@ -782,7 +929,7 @@ class PersistentSearch:
 
         _clipseek_ui(
             "cache_loading",
-            f"ClipSeek: Loading {n_pkls} per-video embedding file(s) — building cache may take a while…",
+            f"ClipSeek: Loading {n_pkls} per-video embedding file(s) — run the Video Embedder to publish an append cache…",
             total=n_pkls,
         )
         print(f"Loading {n_pkls} embedding file(s) from disk.", flush=True)
@@ -827,24 +974,10 @@ class PersistentSearch:
             by_path[key] = obj
         merged = list(by_path.values())
 
-        try:
-            save_v2_from_objects(merged, embeddings_path)
-            print("Saved mmap embedding cache (cached_embeddings.matrix.npy + .meta).", flush=True)
-            try:
-                merged = load_v2_objects(embeddings_path)
-                print("Reloaded mmap embedding cache after rebuild.", flush=True)
-            except Exception as e:
-                print(f"Could not reload mmap cache after rebuild: {e}", flush=True)
-        except Exception as e:
-            print(f"Error saving mmap cache: {e}", flush=True)
-            _clipseek_ui(
-                "cache_save_error",
-                f"ClipSeek: Could not save mmap cache: {e}",
-            )
-
         self._set_cached_objects(merged)
         self.current_video_folder = video_folder
         self.current_embedding_folder = embeddings_path
+        self._set_loaded_cache_state("pkl")
         self._start_exact_warmup(embeddings_path, merged)
         return merged
 
@@ -1281,6 +1414,7 @@ class PersistentSearch:
             )
             t_load = time.time()
             vid_objs = self.load_objs(video_folder, embedding_folder)
+            stale_cache_event = self._cache_stale_event_for_search(embedding_folder)
             load_seconds = time.time() - t_load
             print("Objs loaded in: ", load_seconds, flush=True)
             if date_from or date_to:
@@ -1351,6 +1485,7 @@ class PersistentSearch:
                 results=len(times),
                 seconds=total,
             )
+            self._emit_cache_stale_event(stale_cache_event)
             return {
                 "results": times,
                 "load_seconds": load_seconds,
@@ -1389,6 +1524,10 @@ class PersistentSearch:
                         new_folder = command.get("embedding_folder")
                         video_folder = command.get("video_folder")
                         self.update_embedding_folder(video_folder, new_folder)
+                    elif command.get("command") == "refresh_embeddings":
+                        embedding_folder = command.get("embedding_folder")
+                        video_folder = command.get("video_folder")
+                        self.refresh_embeddings(video_folder, embedding_folder)
                     elif command.get("command") == "search_file":
                         file_path = command.get("file_path")
                         query_type = command.get("query_type")
