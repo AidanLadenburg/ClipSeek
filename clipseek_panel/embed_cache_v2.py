@@ -6,14 +6,13 @@ from __future__ import annotations
 
 import gc
 import os
-import pickle
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
 
-from clipseek_video import ClipseekVideo
+from clipseek_video import ClipseekVideo, load_pickle_compat
 
 META_NAME = "cached_embeddings.meta"
 MATRIX_NAME = "cached_embeddings.matrix.npy"
@@ -88,7 +87,7 @@ def _manifest_v3_path(embeddings_path: str) -> str:
 
 def _load_v3_manifest(embeddings_path: str) -> Dict[str, Any]:
     with open(_manifest_v3_path(embeddings_path), "rb") as f:
-        manifest = pickle.load(f)
+        manifest = load_pickle_compat(f)
     if manifest.get("v") != 3:
         raise ValueError("Unsupported append cache manifest version")
     return manifest
@@ -234,7 +233,7 @@ def load_v2_objects(embeddings_path: str) -> List[Any]:
     matrix_path = os.path.join(embeddings_path, MATRIX_NAME)
 
     with open(meta_path, "rb") as f:
-        meta = pickle.load(f)
+        meta = load_pickle_compat(f)
 
     if meta.get("v") != 2:
         raise ValueError("Unsupported embed cache meta version")
@@ -297,7 +296,7 @@ def load_corpus_row_owner(embeddings_path: str) -> np.ndarray:
     """
     meta_path = os.path.join(embeddings_path, META_NAME)
     with open(meta_path, "rb") as f:
-        meta = pickle.load(f)
+        meta = load_pickle_compat(f)
     n_v = len(meta["paths"])
     if n_v == 0:
         return np.zeros(0, dtype=np.int32)
@@ -323,7 +322,7 @@ def read_manifest_video_count(embeddings_path: str) -> Optional[int]:
         return None
     try:
         with open(p, "rb") as f:
-            meta = pickle.load(f)
+            meta = load_pickle_compat(f)
         if meta.get("v") != 2:
             return None
         return len(meta["paths"])

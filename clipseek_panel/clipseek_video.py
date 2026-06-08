@@ -40,19 +40,34 @@ class _ClipseekUnpickler(pickle.Unpickler):
     def find_class(self, module, name):
         if name in ("video_obj", "ClipseekVideo"):
             return ClipseekVideo
-        if module == "numpy._core":
-            module = "numpy.core"
-        elif module.startswith("numpy._core."):
-            module = "numpy.core." + module[len("numpy._core.") :]
+        modules = _compatible_numpy_pickle_modules(module)
+        last_error = None
+        for candidate in modules:
+            try:
+                return super().find_class(candidate, name)
+            except (AttributeError, ImportError, ModuleNotFoundError) as e:
+                last_error = e
+                if len(modules) == 1:
+                    raise
+        if last_error is not None:
+            raise last_error
         return super().find_class(module, name)
 
 
+def _compatible_numpy_pickle_modules(module):
+    if module == "numpy.core":
+        return [module, "numpy._core"]
+    elif module.startswith("numpy.core."):
+        return [module, "numpy._core." + module[len("numpy.core.") :]]
+    elif module == "numpy._core":
+        return [module, "numpy.core"]
+    elif module.startswith("numpy._core."):
+        return [module, "numpy.core." + module[len("numpy._core.") :]]
+    return [module]
+
+
 def load_pickle_compat(file_obj):
-    try:
-        return pickle.load(file_obj)
-    except (AttributeError, ModuleNotFoundError, pickle.UnpicklingError):
-        file_obj.seek(0)
-        return _ClipseekUnpickler(file_obj).load()
+    return _ClipseekUnpickler(file_obj).load()
 
 
 def load_clipseek_video_pickle(file_path):
