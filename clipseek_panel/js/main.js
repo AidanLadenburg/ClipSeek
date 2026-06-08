@@ -144,14 +144,88 @@
     }
   }
 
+  let embeddingCacheReady = false;
+
+  function setEmbeddingCacheIndicatorReady(ready, title) {
+    embeddingCacheReady = !!ready;
+    setClipseekReadyIndicator(embeddingCacheReady ? 'ready' : 'pending');
+    const dot = document.getElementById('clipseekReadyDot');
+    if (dot && title) {
+      dot.title = title;
+      dot.setAttribute('aria-label', title);
+    }
+  }
+
+  function updateReadyIndicatorFromStatus(payload) {
+    if (!payload) return;
+    const phase = String(payload.phase || '');
+    const videos = typeof payload.videos === 'number' ? payload.videos : null;
+
+    if (phase === 'search_ready') {
+      setEmbeddingCacheIndicatorReady(
+        videos !== null && videos > 0,
+        videos !== null && videos > 0
+          ? `ClipSeek: embedding cache ready (${videos} videos).`
+          : 'ClipSeek: backend ready; select an embedding folder to load your library.'
+      );
+      return;
+    }
+
+    if (phase === 'embeddings_reloaded') {
+      setEmbeddingCacheIndicatorReady(
+        videos !== null && videos > 0,
+        videos !== null && videos > 0
+          ? `ClipSeek: embedding cache ready (${videos} videos).`
+          : 'ClipSeek: embedding folder has no indexed videos.'
+      );
+      return;
+    }
+
+    if (phase === 'embeddings_refresh' && videos !== null) {
+      setEmbeddingCacheIndicatorReady(
+        videos > 0,
+        videos > 0
+          ? `ClipSeek: embedding cache ready (${videos} videos).`
+          : 'ClipSeek: no embedding cache is loaded.'
+      );
+      return;
+    }
+
+    if (
+      phase === 'model_loading' ||
+      phase === 'embeddings_saving' ||
+      phase === 'cache_loading' ||
+      phase === 'cache_progress'
+    ) {
+      setEmbeddingCacheIndicatorReady(false, 'ClipSeek: loading embedding cache.');
+      return;
+    }
+
+    if (
+      phase === 'embeddings_pending' ||
+      phase === 'embeddings_cleared' ||
+      phase === 'cache_empty'
+    ) {
+      setEmbeddingCacheIndicatorReady(false, 'ClipSeek: no embedding cache is loaded.');
+      return;
+    }
+
+    if (phase === 'embeddings_error' || phase === 'cache_error') {
+      setEmbeddingCacheIndicatorReady(false, 'ClipSeek: embedding cache failed to load.');
+    }
+  }
+
   // Phases that should clear the status line so it doesn't linger between searches.
   // Anything else (search_done, error states) we leave visible until the next search starts.
   const STATUS_CLEAR_DELAY_MS = 4000;
   let statusClearTimer = null;
 
   function setSearchStatus(payload) {
+    if (!payload || typeof payload.message !== 'string') return;
+    updateReadyIndicatorFromStatus(payload);
+
     const el = document.getElementById('searchStatusLine');
-    if (!el || !payload || typeof payload.message !== 'string') return;
+    if (!el) return;
 
     const phase = String(payload.phase || '');
     const isError = payload.level === 'error' || phase.endsWith('_error');
@@ -199,8 +273,22 @@
         setSearchStatus(payload);
       }
     },
-    onPythonReady: () => setClipseekReadyIndicator('ready'),
-    onPythonStop: () => setClipseekReadyIndicator('stopped'),
+    onPythonReady: () => {
+      if (embeddingCacheReady) {
+        setClipseekReadyIndicator('ready');
+      } else {
+        setClipseekReadyIndicator('pending');
+        const dot = document.getElementById('clipseekReadyDot');
+        if (dot) {
+          dot.title = 'ClipSeek: backend ready; select or load an embedding cache.';
+          dot.setAttribute('aria-label', dot.title);
+        }
+      }
+    },
+    onPythonStop: () => {
+      embeddingCacheReady = false;
+      setClipseekReadyIndicator('stopped');
+    },
   });
   const results = createResultsController({ csInterface, getFullResPath, sdkLog });
 

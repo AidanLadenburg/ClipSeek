@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<ExtensionManifest Version="9.0" ExtensionBundleId="com.clipseek2" ExtensionBundleVersion="0.0.4"
-ExtensionBundleName="Clip Seek2" 
+<ExtensionManifest Version="9.0" ExtensionBundleId="com.clipseek2" ExtensionBundleVersion="0.0.5"
+ExtensionBundleName="Clip Seek 0.0.5" 
 xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
 	<ExtensionList>
-		<Extension Id="com.clipseek2" Version="0.0.4" />
+		<Extension Id="com.clipseek2" Version="0.0.5" />
 	</ExtensionList>
 
 	<ExecutionEnvironment>
@@ -45,7 +45,7 @@ xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
 				</Lifecycle>
 				<UI>
 					<Type>Panel</Type>
-					<Menu>ClipSeek(DEV)2</Menu>
+					<Menu>ClipSeek 0.0.5</Menu>
 					<Geometry>
 						<Size>
 							<Height>600</Height>
