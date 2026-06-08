@@ -25,6 +25,7 @@ from embed_cache_v2 import (
     v3_bundle_exists,
     v2_bundle_exists,
     write_v3_from_objects,
+    write_v3_from_pkls_streaming,
 )
 
 # Old monolithic cache filename — excluded from per-video scans; removed on explicit regenerate.
@@ -129,30 +130,49 @@ def regenerate_mmap_cache(
 
     If ``progress`` is set, it is called periodically with ``(fraction_0_to_1, message)``.
     """
-    LOAD_END = 0.88
-
-    def _report(frac: float, msg: str) -> None:
+    def _report_stream(frac: float, msg: str) -> None:
         if progress:
             progress(min(1.0, max(0.0, frac)), msg)
 
     os.makedirs(embeddings_path, exist_ok=True)
-    _report(0.0, "Scanning embedding folder…")
+    _report_stream(0.0, "Scanning embedding folder...")
 
-    def _load_progress(processed: int, total: int) -> None:
+    disk_pkls: List[str] = []
+    try:
+        for f in os.scandir(embeddings_path):
+            if f.name.endswith(".pkl") and f.name != LEGACY_MONOLITHIC_PKL:
+                disk_pkls.append(f.path)
+    except OSError as e:
+        logging.error("Cannot read embedding folder: %s", e)
+        _report_stream(1.0, "Could not read embedding folder.")
+        return 0
+
+    total_files = len(disk_pkls)
+    logging.info("Streaming append cache rebuild from %d embedding file(s).", total_files)
+    if total_files == 0:
+        _report_stream(1.0, "No videos to index (folder empty or no valid .pkl files).")
+        return 0
+
+    def _stream_progress(processed: int, total: int, indexed: int) -> None:
         if not total:
             return
-        frac = LOAD_END * (processed / total)
-        _report(frac, f"Loading embeddings ({processed} / {total} files)…")
+        frac = 0.98 * (processed / total)
+        _report_stream(
+            frac,
+            f"Streaming append cache ({processed} / {total} files; {indexed} videos indexed)...",
+        )
 
-    merged = rebuild_merged_list_from_disk(
-        embeddings_path, on_load_progress=_load_progress
+    count = write_v3_from_pkls_streaming(
+        disk_pkls,
+        embeddings_path,
+        _load_one_pkl,
+        progress=_stream_progress,
     )
-    if merged:
-        _report(0.9, "Writing append cache to disk...")
-        write_v3_from_objects(merged, embeddings_path)
-        _report(1.0, "Finished.")
+    if count:
+        _report_stream(1.0, f"Finished ({count} videos indexed).")
     else:
-        _report(1.0, "No videos to index (folder empty or no valid .pkl files).")
+        _report_stream(1.0, "No videos to index (folder empty or no valid .pkl files).")
+
     legacy = os.path.join(embeddings_path, LEGACY_MONOLITHIC_PKL)
     if os.path.isfile(legacy):
         try:
@@ -160,7 +180,7 @@ def regenerate_mmap_cache(
             logging.info("Removed legacy %s.", LEGACY_MONOLITHIC_PKL)
         except OSError as e:
             logging.warning("Could not remove legacy %s: %s", LEGACY_MONOLITHIC_PKL, e)
-    return len(merged)
+    return count
 
 
 class EmbeddingIndexCache:

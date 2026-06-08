@@ -223,6 +223,59 @@
       return el.checked ? 'faiss' : 'exact';
     }
 
+    function queryTypeForLocalFile(file) {
+      const mimeType = String((file && file.type) || '').toLowerCase();
+      const topLevel = mimeType.split('/')[0];
+      if (topLevel === 'image' || topLevel === 'video') {
+        return topLevel;
+      }
+
+      const ext = path.extname(String((file && (file.path || file.name)) || '')).toLowerCase();
+      const imageExts = new Set(['.jpg', '.jpeg', '.jfif', '.png', '.webp', '.bmp', '.gif', '.tif', '.tiff']);
+      const videoExts = new Set(['.mp4', '.mov', '.m4v', '.avi', '.mkv', '.webm']);
+      if (imageExts.has(ext)) return 'image';
+      if (videoExts.has(ext)) return 'video';
+      return null;
+    }
+
+    function sendFileSearch(file) {
+      const queryType = queryTypeForLocalFile(file);
+      const filePath = file && file.path;
+      if (!queryType || !filePath) {
+        setSearchStatus({
+          phase: 'search_error',
+          level: 'error',
+          message: 'ClipSeek: Unsupported file type for file search.',
+        });
+        return;
+      }
+      setSearchStatus({
+        phase: 'search_request',
+        message: `ClipSeek: Sending ${queryType} query "${path.basename(filePath)}"...`,
+      });
+      ensureBridgeReady()
+        .then(() => {
+          bridge.sendJson({
+            command: 'search_file',
+            video_folder: selectedFolders.videoFolder,
+            embedding_folder: selectedFolders.embeddingFolder,
+            annotation_folder: selectedFolders.annotationFolder,
+            file_path: filePath,
+            query_type: queryType,
+            is_mean: JSON.parse(localStorage.getItem('isMean') || 'true'),
+            search_mode: getSearchMode(),
+          });
+        })
+        .catch(() => {
+          sdkLog('Error starting file search process');
+          setSearchStatus({
+            phase: 'search_error',
+            level: 'error',
+            message: 'ClipSeek: Could not start search backend.',
+          });
+        });
+    }
+
     const mainPage = document.getElementById('mainPage');
     const settingsPage = document.getElementById('settingsPage');
     const annotationPage = document.getElementById('annotationPage');
@@ -415,22 +468,8 @@
 
     document.getElementById('fileInput').addEventListener('change', (event) => {
       const f = event.target.files[0];
-      if (!f) return;
-      const fileType = f.type.split('/')[0];
-      const queryType = fileType === 'image' ? 'image' : fileType === 'video' ? 'video' : null;
-      if (!queryType) return;
-      ensureBridgeReady().then(() => {
-        bridge.sendJson({
-          command: 'search_file',
-          video_folder: selectedFolders.videoFolder,
-          embedding_folder: selectedFolders.embeddingFolder,
-          annotation_folder: selectedFolders.annotationFolder,
-          file_path: f.path,
-          query_type: queryType,
-          is_mean: JSON.parse(localStorage.getItem('isMean') || 'true'),
-          search_mode: getSearchMode(),
-        });
-      });
+      if (f) sendFileSearch(f);
+      event.target.value = '';
     });
 
     function applyScoringUi(isMean) {
@@ -620,39 +659,13 @@
       const files = event.dataTransfer.files;
       if (files && files.length > 0 && files[0].path) {
         for (let i = 0; i < files.length; i++) {
-          const file = files[i];
-          const fileType = file.type.split('/')[0];
-          const queryType = fileType === 'image' ? 'image' : fileType === 'video' ? 'video' : null;
-          if (!queryType) continue;
-          ensureBridgeReady().then(() => {
-            bridge.sendJson({
-              command: 'search_file',
-              video_folder: selectedFolders.videoFolder,
-              embedding_folder: selectedFolders.embeddingFolder,
-              annotation_folder: selectedFolders.annotationFolder,
-              file_path: file.path,
-              query_type: queryType,
-              is_mean: JSON.parse(localStorage.getItem('isMean') || 'true'),
-              search_mode: getSearchMode(),
-            });
-          });
+          sendFileSearch(files[i]);
         }
       } else {
         csInterface.evalScript('getSelectedClipFilePath()', (result) => {
           if (result && result !== 'null') {
             sdkLog(result);
-            ensureBridgeReady().then(() => {
-              bridge.sendJson({
-                command: 'search_file',
-                video_folder: selectedFolders.videoFolder,
-                embedding_folder: selectedFolders.embeddingFolder,
-                annotation_folder: selectedFolders.annotationFolder,
-                file_path: result,
-                query_type: 'video',
-                is_mean: JSON.parse(localStorage.getItem('isMean') || 'true'),
-                search_mode: getSearchMode(),
-              });
-            });
+            sendFileSearch({ path: result, name: result, type: '' });
           } else sdkLog('No valid file path from clip.');
         });
       }

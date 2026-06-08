@@ -8,8 +8,9 @@ import gc
 import os
 import pickle
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -313,6 +314,138 @@ def write_v3_from_objects(objects: List[Any], embeddings_path: str) -> None:
         "mtime_ts": np.asarray(mtimes, dtype=np.float64),
     }
     _write_v3_manifest_atomic(embeddings_path, manifest)
+
+
+def write_v3_from_pkls_streaming(
+    pkl_paths: Iterable[str],
+    embeddings_path: str,
+    load_one: Callable[[str], Any],
+    *,
+    chunk_size: int = 1000,
+    max_workers: int = 8,
+    progress: Optional[Callable[[int, int, int], None]] = None,
+) -> int:
+    """
+    Stream a full v3 cache regeneration from per-video pickle files.
+
+    Unlike ``write_v3_from_objects``, this never holds all videos/chunks in
+    memory. It writes each loaded batch to a new matrix file immediately and
+    keeps only compact manifest metadata until the final atomic publish.
+    """
+    os.makedirs(embeddings_path, exist_ok=True)
+    disk_pkls = list(pkl_paths)
+    total_files = len(disk_pkls)
+    if total_files == 0:
+        if progress:
+            progress(0, 0, 0)
+        return 0
+
+    matrix_file = _next_matrix_bin_name(embeddings_path)
+    matrix_path = os.path.join(embeddings_path, matrix_file)
+    tmp_matrix = matrix_path + ".tmp"
+
+    paths: List[str] = []
+    path_keys: List[str] = []
+    titles: List[str] = []
+    strides: List[float] = []
+    mtimes: List[float] = []
+    row_start: List[int] = []
+    n_chunks: List[int] = []
+    key_to_index: Dict[str, int] = {}
+    embed_dim = 0
+    row_cursor = 0
+
+    try:
+        with open(tmp_matrix, "wb") as f:
+            if progress:
+                progress(0, total_files, 0)
+
+            for i in range(0, total_files, chunk_size):
+                chunk = disk_pkls[i : i + chunk_size]
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    loaded = list(filter(None, executor.map(load_one, chunk)))
+
+                for obj in loaded:
+                    arr = chunks_to_numpy_2d(getattr(obj, "chunks", None))
+                    if arr.shape[0] == 0 or arr.shape[1] == 0:
+                        continue
+                    if embed_dim == 0:
+                        embed_dim = int(arr.shape[1])
+                    elif int(arr.shape[1]) != embed_dim:
+                        raise ValueError(
+                            f"Inconsistent embed dim: expected {embed_dim}, got {arr.shape[1]} for {getattr(obj, 'path', '?')}"
+                        )
+
+                    arr = np.ascontiguousarray(arr, dtype=np.float32)
+                    rs = int(row_cursor)
+                    nc = int(arr.shape[0])
+                    f.write(arr.tobytes(order="C"))
+                    row_cursor += nc
+
+                    p = str(getattr(obj, "path", ""))
+                    key = manifest_path_key(p)
+                    if key in key_to_index:
+                        idx = key_to_index[key]
+                        paths[idx] = p
+                        path_keys[idx] = key
+                        titles[idx] = str(
+                            getattr(obj, "title", "") or os.path.basename(p)
+                        )
+                        row_start[idx] = rs
+                        n_chunks[idx] = nc
+                        strides[idx] = float(getattr(obj, "chunk_stride_sec", 10.0))
+                        mtimes[idx] = _video_mtime_ts(obj)
+                    else:
+                        key_to_index[key] = len(paths)
+                        paths.append(p)
+                        path_keys.append(key)
+                        titles.append(
+                            str(getattr(obj, "title", "") or os.path.basename(p))
+                        )
+                        row_start.append(rs)
+                        n_chunks.append(nc)
+                        strides.append(float(getattr(obj, "chunk_stride_sec", 10.0)))
+                        mtimes.append(_video_mtime_ts(obj))
+
+                del loaded
+                gc.collect()
+
+                if progress:
+                    processed = min(i + len(chunk), total_files)
+                    progress(processed, total_files, len(paths))
+
+            if not paths:
+                return 0
+
+            f.flush()
+            os.fsync(f.fileno())
+
+        os.replace(tmp_matrix, matrix_path)
+
+        old_summary = read_v3_manifest_summary(embeddings_path)
+        old_generation = int(old_summary["generation"]) if old_summary else 0
+        manifest = {
+            "v": 3,
+            "generation": old_generation + 1,
+            "matrix_file": matrix_file,
+            "embed_dim": int(embed_dim),
+            "total_rows": int(row_cursor),
+            "paths": paths,
+            "path_keys": path_keys,
+            "titles": titles,
+            "row_start": np.asarray(row_start, dtype=np.int64),
+            "n_chunks": np.asarray(n_chunks, dtype=np.int32),
+            "chunk_stride_sec": np.asarray(strides, dtype=np.float32),
+            "mtime_ts": np.asarray(mtimes, dtype=np.float64),
+        }
+        _write_v3_manifest_atomic(embeddings_path, manifest)
+        return len(paths)
+    finally:
+        if os.path.exists(tmp_matrix):
+            try:
+                os.remove(tmp_matrix)
+            except OSError:
+                pass
 
 
 def append_v3_objects(objects: List[Any], embeddings_path: str) -> None:

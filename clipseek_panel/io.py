@@ -121,6 +121,19 @@ def fix_path(path, log_missing=True):
     return path
 
 
+IMAGE_QUERY_EXTS = {".jpg", ".jpeg", ".jfif", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
+VIDEO_QUERY_EXTS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
+
+
+def infer_file_query_type(path):
+    ext = os.path.splitext(str(path or ""))[1].lower()
+    if ext in IMAGE_QUERY_EXTS:
+        return "image"
+    if ext in VIDEO_QUERY_EXTS:
+        return "video"
+    return None
+
+
 def chunks_to_tensor(chunks, device):
     if chunks is None:
         return torch.zeros(0, device=device)
@@ -636,6 +649,14 @@ class PersistentSearch:
             if search_mode not in ("exact", "faiss"):
                 search_mode = "exact"
             faiss_requested = search_mode == "faiss"
+            file_path = fix_path(file_path)
+            inferred_query_type = infer_file_query_type(file_path)
+            if inferred_query_type and inferred_query_type != query_type:
+                print(
+                    f"Correcting file search query_type from {query_type} to {inferred_query_type} for {file_path}",
+                    flush=True,
+                )
+                query_type = inferred_query_type
 
             short_name = os.path.basename(file_path) if file_path else "(file)"
             _clipseek_ui(
@@ -671,7 +692,7 @@ class PersistentSearch:
             if query_type == "image":
                 q = self.embedder.get_image_feat(file_path).to(self.device)
             elif query_type == "video":
-                q = self.embedder.get_vid_feat_tensor(fix_path(file_path)).to(self.device)
+                q = self.embedder.get_vid_feat_tensor(file_path).to(self.device)
             else:
                 _clipseek_error(f"ClipSeek: Unsupported query type: {query_type}")
                 return {"error": "Unsupported query type", "results": []}
