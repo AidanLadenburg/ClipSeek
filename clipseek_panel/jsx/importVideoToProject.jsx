@@ -4,25 +4,7 @@ function importVideoToProject(filePath, markerTime, isProxy, fullResVideoPath) {
             var importSuccess = app.project.importFiles([filePath],true, app.project.rootItem, false);
         }else{
             var importSuccess = app.project.importFiles([fullResVideoPath],true, app.project.rootItem, false);
-            var newItem = app.project.rootItem.children[app.project.rootItem.children.numItems - 1];
-
-            var proxyFileExists = new File(filePath).exists;
-            var fullResFileExists = new File(fullResVideoPath).exists;
-            app.setSDKEventMessage(
-                "ClipSeek (debug): proxy exists=" + proxyFileExists + " path=" + filePath +
-                " | fullRes exists=" + fullResFileExists + " path=" + fullResVideoPath +
-                " | importSuccess=" + importSuccess + " newItem=" + (newItem ? newItem.name : "null"),
-                "info"
-            );
-
-            // Premiere can still be finishing media analysis on the just-imported
-            // clip; attachProxy() fails intermittently if called too soon after
-            // importFiles() returns, so retry briefly before giving up.
-            var x = false;
-            for (var attempt = 0; attempt < 5 && !x; attempt++) {
-                if (attempt > 0) { $.sleep(300); }
-                x = newItem.attachProxy(filePath, 0);
-            }
+            var x = app.project.rootItem.children[app.project.rootItem.children.numItems - 1].attachProxy(filePath, 0);
             if (!x){app.setSDKEventMessage("Proxy failed to attach.", "info");}
         }
         if (!importSuccess) {
