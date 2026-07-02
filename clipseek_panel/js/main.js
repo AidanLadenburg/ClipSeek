@@ -114,10 +114,15 @@
     return;
   }
 
+  function escJsx(value) {
+    return String(value == null ? '' : value)
+      .replace(/\\/g, '\\\\')
+      .replace(/"/g, '\\"');
+  }
+
   function sdkLog(message) {
     try {
-      const escaped = String(message).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-      csInterface.evalScript(`app.setSDKEventMessage("${escaped}", "info")`);
+      csInterface.evalScript(`app.setSDKEventMessage("${escJsx(message)}", "info")`);
     } catch {
       /* ignore */
     }
@@ -300,6 +305,7 @@
     fullResResolver,
     bridge,
     sdkLog,
+    escJsx,
   });
 
   let selectedFolders = {
@@ -736,7 +742,7 @@
       });
       const fullResExists = fullResVideoPath && fs.existsSync(fullResVideoPath);
       csInterface.evalScript(
-        `importVideoToProject("${normalized.replace(/\\/g, '\\\\')}", "${ctx.time}", ${useProxy && fullResExists},"${fullResVideoPath}")`
+        `importVideoToProject("${escJsx(normalized)}", "${ctx.time}", ${useProxy && fullResExists},"${escJsx(fullResVideoPath)}")`
       );
       contextMenu.style.display = 'none';
     });

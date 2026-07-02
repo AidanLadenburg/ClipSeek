@@ -28,7 +28,7 @@ function positionContextMenu(menu, clientX, clientY) {
   menu.style.top = `${y}px`;
 }
 
-function createResultsController({ csInterface, getFullResPath, fullResResolver, bridge, sdkLog }) {
+function createResultsController({ csInterface, getFullResPath, fullResResolver, bridge, sdkLog, escJsx }) {
   const selectedVideos = new Set();
   let displayedCount = 20;
   let allFiles = [];
@@ -186,7 +186,7 @@ function createResultsController({ csInterface, getFullResPath, fullResResolver,
         const fullResExists = fullResVideoPath && require('fs').existsSync(fullResVideoPath);
 
         csInterface.evalScript(
-          `importVideoToProject("${normalizedSelectedVideoPath.replace(/\\/g, '\\\\')}", "${time}", ${useProxy && fullResExists},"${fullResVideoPath}")`
+          `importVideoToProject("${escJsx(normalizedSelectedVideoPath)}", "${time}", ${useProxy && fullResExists},"${escJsx(fullResVideoPath)}")`
         );
       });
 
@@ -229,7 +229,7 @@ function createResultsController({ csInterface, getFullResPath, fullResResolver,
       });
       const fullResExists = fullResVideoPath && fs.existsSync(fullResVideoPath);
       csInterface.evalScript(
-        `importVideoToProject("${normalizedSelectedVideoPath.replace(/\\/g, '\\\\')}", "${time}", ${useProxy && fullResExists},"${fullResVideoPath}")`
+        `importVideoToProject("${escJsx(normalizedSelectedVideoPath)}", "${time}", ${useProxy && fullResExists},"${escJsx(fullResVideoPath)}")`
       );
     }
     clearSelected();
