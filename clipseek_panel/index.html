@@ -136,6 +136,43 @@
             </div>
 
             <div class="field">
+                <label class="switch-row">
+                    <span class="field-label">Resolve full-res via eMAM</span>
+                    <label class="switch">
+                        <input type="checkbox" id="emamSwitch">
+                        <span class="slider round"></span>
+                    </label>
+                </label>
+            </div>
+
+            <div id="emamSettings" class="panel panel--nested" hidden>
+                <div class="field">
+                    <label class="field-label" for="emamIp">eMAM server IP / host</label>
+                    <div class="field-row">
+                        <input type="text" id="emamIp" class="input" placeholder="e.g. 10.0.0.5">
+                    </div>
+                </div>
+                <div class="field">
+                    <label class="field-label" for="emamUsername">Username</label>
+                    <div class="field-row">
+                        <input type="text" id="emamUsername" class="input">
+                    </div>
+                </div>
+                <div class="field">
+                    <label class="field-label" for="emamPassword">Password</label>
+                    <div class="field-row">
+                        <input type="password" id="emamPassword" class="input" placeholder="Leave blank to keep existing password">
+                    </div>
+                </div>
+                <div class="field">
+                    <label class="field-label" for="emamLicenseKey">License key</label>
+                    <div class="field-row">
+                        <input type="text" id="emamLicenseKey" class="input">
+                    </div>
+                </div>
+            </div>
+
+            <div class="field">
                 <button type="button" id="annotationPageBtn" class="btn btn--secondary">Annotations…</button>
             </div>
 

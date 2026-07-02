@@ -28,7 +28,7 @@ function positionContextMenu(menu, clientX, clientY) {
   menu.style.top = `${y}px`;
 }
 
-function createResultsController({ csInterface, getFullResPath, sdkLog }) {
+function createResultsController({ csInterface, getFullResPath, fullResResolver, bridge, sdkLog }) {
   const selectedVideos = new Set();
   let displayedCount = 20;
   let allFiles = [];
@@ -169,18 +169,20 @@ function createResultsController({ csInterface, getFullResPath, sdkLog }) {
         updateBulkActionVisibility();
       });
 
-      videoContainer.addEventListener('dblclick', () => {
+      videoContainer.addEventListener('dblclick', async () => {
         const proxyPath = document.getElementById('proxyLocation').value.trim();
         const fullResPath = document.getElementById('fullResLocation').value.trim();
         const useProxy = document.getElementById('proxySwitch').checked;
 
         const normalizedSelectedVideoPath = vid.replace(/\\/g, '/');
-        const fullResVideoPath = getFullResPath(
+        const fullResVideoPath = await fullResResolver.resolveFullResPath({
+          videoPath: normalizedSelectedVideoPath,
           proxyPath,
-          fullResPath,
-          normalizedSelectedVideoPath,
-          useProxy ? sdkLog : null
-        );
+          fullResPaths: fullResPath,
+          useProxy,
+          bridge,
+          logIfProxy: useProxy ? sdkLog : null,
+        });
         const fullResExists = fullResVideoPath && require('fs').existsSync(fullResVideoPath);
 
         csInterface.evalScript(
@@ -208,26 +210,28 @@ function createResultsController({ csInterface, getFullResPath, sdkLog }) {
     loadMoreBtn.hidden = displayedCount >= files.length;
   }
 
-  function importSelectedVideos() {
+  async function importSelectedVideos() {
     const fs = require('fs');
     const proxyPath = document.getElementById('proxyLocation').value.trim();
     const fullResPath = document.getElementById('fullResLocation').value.trim();
     const useProxy = document.getElementById('proxySwitch').checked;
 
-    selectedVideos.forEach((objKey) => {
+    for (const objKey of selectedVideos) {
       const { videoPath, time } = JSON.parse(objKey);
       const normalizedSelectedVideoPath = videoPath.replace(/\\/g, '/');
-      const fullResVideoPath = getFullResPath(
+      const fullResVideoPath = await fullResResolver.resolveFullResPath({
+        videoPath: normalizedSelectedVideoPath,
         proxyPath,
-        fullResPath,
-        normalizedSelectedVideoPath,
-        useProxy ? sdkLog : null
-      );
+        fullResPaths: fullResPath,
+        useProxy,
+        bridge,
+        logIfProxy: useProxy ? sdkLog : null,
+      });
       const fullResExists = fullResVideoPath && fs.existsSync(fullResVideoPath);
       csInterface.evalScript(
         `importVideoToProject("${normalizedSelectedVideoPath.replace(/\\/g, '\\\\')}", "${time}", ${useProxy && fullResExists},"${fullResVideoPath}")`
       );
-    });
+    }
     clearSelected();
   }
 

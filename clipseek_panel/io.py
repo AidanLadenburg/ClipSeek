@@ -25,6 +25,7 @@ EXACT_WARMUP_PAGE_STRIDE_FLOATS = 1024
 EXACT_KERNEL_WARM_ROWS = 1024
 
 from cosmos_embedder import CosmosEmbedder
+from emam_client import EmamClient, EmamError
 from clipseek_video import load_clipseek_video_pickle
 from embed_cache_v2 import (
     load_v3_objects,
@@ -224,6 +225,7 @@ class PersistentSearch:
     def __init__(self, video_folder=None, embedding_folder=None):
         print("Startup...", flush=True)
         self.embedder = CosmosEmbedder()
+        self.emam_client = EmamClient()
         _clipseek_ui(
             "model_loading",
             "ClipSeek: Loading Cosmos embedding model…",
@@ -630,6 +632,60 @@ class PersistentSearch:
         current.save(f"{folder}\\{key}.anno")
 
         print(f"Annotation created: {json.dumps(f'{key}, {annotation_type}, {value}')}", flush=True)
+
+    def save_emam_config(self, config: dict, request_id) -> dict:
+        try:
+            self.emam_client.save_config(config)
+            return {"command": "save_emam_config", "request_id": request_id, "saved": True}
+        except Exception as e:
+            _clipseek_error(
+                f"ClipSeek: Failed to save EMAM config — {e}", exc=e, phase="emam_config_error"
+            )
+            return {
+                "command": "save_emam_config",
+                "request_id": request_id,
+                "saved": False,
+                "error": str(e),
+            }
+
+    def get_emam_config(self, request_id) -> dict:
+        try:
+            cfg = self.emam_client.get_config_for_display()
+            return {"command": "get_emam_config", "request_id": request_id, **cfg}
+        except Exception as e:
+            return {
+                "command": "get_emam_config",
+                "request_id": request_id,
+                "enabled": False,
+                "error": str(e),
+            }
+
+    def resolve_emam_uuid(self, uuid: str, request_id) -> dict:
+        if not self.emam_client.is_enabled():
+            return {
+                "command": "resolve_emam_uuid",
+                "request_id": request_id,
+                "path": None,
+                "error": "EMAM disabled",
+            }
+        try:
+            path = self.emam_client.resolve_uuid(uuid)
+            return {"command": "resolve_emam_uuid", "request_id": request_id, "path": path, "error": None}
+        except EmamError as e:
+            return {
+                "command": "resolve_emam_uuid",
+                "request_id": request_id,
+                "path": None,
+                "error": str(e),
+            }
+        except Exception as e:
+            _clipseek_error(f"ClipSeek: EMAM lookup failed — {e}", exc=e, phase="emam_error")
+            return {
+                "command": "resolve_emam_uuid",
+                "request_id": request_id,
+                "path": None,
+                "error": str(e),
+            }
 
     def search_file(
         self,
@@ -1549,6 +1605,19 @@ class PersistentSearch:
                         embedding_folder = command.get("embedding_folder")
                         video_folder = command.get("video_folder")
                         self.refresh_embeddings(video_folder, embedding_folder)
+                    elif command.get("command") == "save_emam_config":
+                        result = self.save_emam_config(
+                            command.get("config", {}), command.get("request_id")
+                        )
+                        print(json.dumps(result), flush=True)
+                    elif command.get("command") == "get_emam_config":
+                        result = self.get_emam_config(command.get("request_id"))
+                        print(json.dumps(result), flush=True)
+                    elif command.get("command") == "resolve_emam_uuid":
+                        result = self.resolve_emam_uuid(
+                            command.get("uuid"), command.get("request_id")
+                        )
+                        print(json.dumps(result), flush=True)
                     elif command.get("command") == "search_file":
                         file_path = command.get("file_path")
                         query_type = command.get("query_type")
