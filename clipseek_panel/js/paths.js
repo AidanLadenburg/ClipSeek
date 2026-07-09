@@ -1,6 +1,22 @@
 'use strict';
 
 const fs = require('fs');
+const path = require('path');
+
+const EMAM_UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+/**
+ * Extract an eMAM asset UUID from a local proxy filename like "<uuid>_1.mp4".
+ * Returns null if the basename (after stripping extension and a trailing
+ * "_<digits>" suffix) doesn't look like a UUID.
+ */
+function extractEmamUuid(filePath) {
+  if (!filePath) return null;
+  const base = path.basename(String(filePath).replace(/\\/g, '/'));
+  const withoutExt = base.replace(/\.[^./]+$/, '');
+  const withoutSuffix = withoutExt.replace(/_\d+$/, '');
+  return EMAM_UUID_RE.test(withoutSuffix) ? withoutSuffix : null;
+}
 
 /**
  * Map a proxy path to a full-resolution path (comma-separated candidates).
@@ -65,4 +81,4 @@ function getFullResPath(proxyPath, fullResPaths, videoPath, logIfProxy) {
   return null;
 }
 
-module.exports = { getFullResPath };
+module.exports = { getFullResPath, extractEmamUuid };

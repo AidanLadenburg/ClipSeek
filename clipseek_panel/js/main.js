@@ -20,7 +20,7 @@
       '• Fully quit and restart Premiere after changing the manifest',
       '• Copy the whole extension folder (index.html, js/, lib/, jsx/, css/, CSXS/)',
       '',
-      'If you see a module / "Cannot find module" error: copy js/paths.js, js/bridge.js, and js/results.js into the extension; main.js loads them via the extension path (require("./…") from CEP often breaks).',
+      'If you see a module / "Cannot find module" error: copy js/paths.js, js/bridge.js, js/results.js, and js/fullResResolver.js into the extension; main.js loads them via the extension path (require("./…") from CEP often breaks).',
     ].join('\n');
 
     function paint() {
@@ -57,8 +57,10 @@
   let fs;
   let csInterface;
   let getFullResPath;
+  let extractEmamUuid;
   let createSearchBridge;
   let createResultsController;
+  let createFullResResolver;
 
   try {
     if (typeof require !== 'function') {
@@ -103,18 +105,24 @@
       );
     }
 
-    ({ getFullResPath } = loadJsModule('paths.js'));
+    ({ getFullResPath, extractEmamUuid } = loadJsModule('paths.js'));
     ({ createSearchBridge } = loadJsModule('bridge.js'));
     ({ createResultsController } = loadJsModule('results.js'));
+    ({ createFullResResolver } = loadJsModule('fullResResolver.js'));
   } catch (e) {
     showBootError(e);
     return;
   }
 
+  function escJsx(value) {
+    return String(value == null ? '' : value)
+      .replace(/\\/g, '\\\\')
+      .replace(/"/g, '\\"');
+  }
+
   function sdkLog(message) {
     try {
-      const escaped = String(message).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-      csInterface.evalScript(`app.setSDKEventMessage("${escaped}", "info")`);
+      csInterface.evalScript(`app.setSDKEventMessage("${escJsx(message)}", "info")`);
     } catch {
       /* ignore */
     }
@@ -290,7 +298,15 @@
       setClipseekReadyIndicator('stopped');
     },
   });
-  const results = createResultsController({ csInterface, getFullResPath, sdkLog });
+  const fullResResolver = createFullResResolver({ getFullResPath, extractEmamUuid, sdkLog });
+  const results = createResultsController({
+    csInterface,
+    getFullResPath,
+    fullResResolver,
+    bridge,
+    sdkLog,
+    escJsx,
+  });
 
   let selectedFolders = {
     videoFolder: localStorage.getItem('videoFolder') || '',
@@ -383,6 +399,22 @@
     document.getElementById('settingsBtn').addEventListener('click', () => {
       mainPage.hidden = true;
       settingsPage.hidden = false;
+
+      ensureBridgeReady()
+        .then(() => bridge.sendJsonRequest({ command: 'get_emam_config' }))
+        .then((cfg) => {
+          if (!cfg) return;
+          document.getElementById('emamIp').value = cfg.ip || '';
+          document.getElementById('emamUsername').value = cfg.username || '';
+          document.getElementById('emamLicenseKey').value = cfg.license_key || '';
+          document.getElementById('emamPassword').placeholder = cfg.has_password
+            ? 'Password saved (leave blank to keep)'
+            : '';
+          document.getElementById('emamSwitch').checked = !!cfg.enabled;
+          document.getElementById('emamSettings').hidden = !cfg.enabled;
+          localStorage.setItem('emamEnabled', JSON.stringify(!!cfg.enabled));
+        })
+        .catch((err) => sdkLog('Failed to load EMAM settings: ' + err.message));
     });
 
     document.getElementById('backBtn').addEventListener('click', () => {
@@ -414,6 +446,28 @@
       localStorage.setItem('fullResLocation', document.getElementById('fullResLocation').value);
       localStorage.setItem('debugMode', JSON.stringify(document.getElementById('debugSwitch').checked));
       localStorage.setItem('isProxy', JSON.stringify(document.getElementById('proxySwitch').checked));
+
+      const emamPasswordEl = document.getElementById('emamPassword');
+      const emamConfig = {
+        enabled: document.getElementById('emamSwitch').checked,
+        ip: document.getElementById('emamIp').value.trim(),
+        username: document.getElementById('emamUsername').value.trim(),
+        license_key: document.getElementById('emamLicenseKey').value.trim(),
+      };
+      if (emamPasswordEl.value) emamConfig.password = emamPasswordEl.value;
+      localStorage.setItem('emamEnabled', JSON.stringify(emamConfig.enabled));
+
+      ensureBridgeReady()
+        .then(() => bridge.sendJsonRequest({ command: 'save_emam_config', config: emamConfig }))
+        .then((res) => {
+          if (!res || !res.saved) {
+            sdkLog('ClipSeek: Failed to save EMAM settings' + (res && res.error ? ': ' + res.error : ''));
+          }
+        })
+        .catch((err) => sdkLog('ClipSeek: Failed to save EMAM settings: ' + err.message))
+        .finally(() => {
+          emamPasswordEl.value = '';
+        });
 
       selectedFolders.embeddingFolder = newEmbeddingFolder;
       selectedFolders.videoFolder = newVideoFolder;
@@ -601,6 +655,17 @@
       });
     });
 
+    const emamSwitch = document.getElementById('emamSwitch');
+    const emamSettings = document.getElementById('emamSettings');
+
+    function refreshEmamSection() {
+      emamSettings.hidden = !emamSwitch.checked;
+    }
+
+    // Unlike proxySwitch, don't clear the text fields on toggle-off: EMAM
+    // credentials live server-side in Python, not derived from field contents.
+    emamSwitch.addEventListener('change', refreshEmamSection);
+
     document.getElementById('proxyLocationSelectBtn').addEventListener('click', () => {
       csInterface.evalScript(`selectFolder()`, (folderPath) => {
         if (folderPath && folderPath !== 'null') {
@@ -660,17 +725,24 @@
       }
     });
 
-    document.getElementById('importOption').addEventListener('click', () => {
+    document.getElementById('importOption').addEventListener('click', async () => {
       const ctx = window.__clipseekContext;
       if (!ctx) return;
       const proxyPath = document.getElementById('proxyLocation').value.trim();
       const fullResPath = document.getElementById('fullResLocation').value.trim();
       const useProxy = document.getElementById('proxySwitch').checked;
       const normalized = ctx.videoPath.replace(/\\/g, '/');
-      const fullResVideoPath = getFullResPath(proxyPath, fullResPath, normalized, useProxy ? sdkLog : null);
+      const fullResVideoPath = await fullResResolver.resolveFullResPath({
+        videoPath: normalized,
+        proxyPath,
+        fullResPaths: fullResPath,
+        useProxy,
+        bridge,
+        logIfProxy: useProxy ? sdkLog : null,
+      });
       const fullResExists = fullResVideoPath && fs.existsSync(fullResVideoPath);
       csInterface.evalScript(
-        `importVideoToProject("${normalized.replace(/\\/g, '\\\\')}", "${ctx.time}", ${useProxy && fullResExists},"${fullResVideoPath}")`
+        `importVideoToProject("${escJsx(normalized)}", "${ctx.time}", ${useProxy && fullResExists},"${escJsx(fullResVideoPath)}")`
       );
       contextMenu.style.display = 'none';
     });

@@ -88,6 +88,8 @@ function createSearchBridge({
   let pythonProcess = null;
   let processReady = false;
   let stdoutBuffer = '';
+  const pendingRequests = new Map();
+  let requestCounter = 0;
 
   function attachJsonStdoutParser(onJsonLine) {
     pythonProcess.stdout.on('data', (data) => {
@@ -103,6 +105,12 @@ function createSearchBridge({
         }
         try {
           const result = JSON.parse(line);
+          if (result && result.request_id && pendingRequests.has(result.request_id)) {
+            const { resolve } = pendingRequests.get(result.request_id);
+            pendingRequests.delete(result.request_id);
+            resolve(result);
+            continue;
+          }
           if (result.error) {
             sdkLog('Python: ' + result.error);
             if (result.traceback && getDebugMode && getDebugMode()) {
@@ -196,6 +204,8 @@ function createSearchBridge({
       pythonProcess = null;
       processReady = false;
       stdoutBuffer = '';
+      for (const [, { reject }] of pendingRequests) reject(new Error('Python process stopped'));
+      pendingRequests.clear();
       if (onPythonStop) onPythonStop();
     }
   }
@@ -204,11 +214,36 @@ function createSearchBridge({
     if (pythonProcess) pythonProcess.stdin.write(JSON.stringify(obj) + '\n');
   }
 
+  /**
+   * Like sendJson, but stamps a request_id and resolves once a stdout JSON line
+   * echoing that request_id arrives — lets callers await a specific response
+   * instead of it going to the generic onJsonLine (search-results) callback.
+   */
+  function sendJsonRequest(obj, { timeoutMs = 15000 } = {}) {
+    if (!pythonProcess) return Promise.reject(new Error('Python process not running'));
+    const requestId = `req_${Date.now()}_${++requestCounter}`;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pendingRequests.delete(requestId);
+        reject(new Error('Request timed out'));
+      }, timeoutMs);
+      pendingRequests.set(requestId, {
+        resolve: (result) => {
+          clearTimeout(timer);
+          resolve(result);
+        },
+        reject,
+      });
+      pythonProcess.stdin.write(JSON.stringify({ ...obj, request_id: requestId }) + '\n');
+    });
+  }
+
   return {
     resolveSearchBackend: () => resolveSearchBackend(null),
     startPythonProcess,
     stopPythonProcess,
     sendJson,
+    sendJsonRequest,
     get process() {
       return pythonProcess;
     },
